@@ -14,6 +14,196 @@ zh-vocab(단일 파일 앱 `index.html`)의 변경 이력을 기록한다. 여�
 
 ---
 
+## 2026-09-12 통합 리뷰 수정: HanziWriter 인스턴스 누수 외 3건 + 저비용 5건
+
+- 요지: 위 "예문 빈칸 채우기(cloze)"·"획순 연습 기능 추가"(둘 다 아직 미커밋) 커밋에 대한 리뷰에서 지적된
+  🟡3건과 저비용 💡5건을 수정했다.
+- 🟡1 (HanziWriter 인스턴스 누수, `mountStrokeWriter`) — 리뷰 재현(모달 20회 열닫 → 20개 전부 생존)의
+  원인은 라이브러리 내부 `Ct` 생성자가 `_setupListeners()`에서 `document`에 `mouseup`/`touchend`
+  리스너를 달고(`addPointerEndListener`), `HanziWriter.create()`를 부를 때마다(모달을 열 때, 글자 탭을
+  바꿀 때, 모드를 바꿀 때, "다시 재생"할 때) 매번 새 `Ct` 인스턴스가 생겨 리스너가 계속 쌓이는 구조였다.
+  라이브러리에 `setCharacter(char)`가 있고 이건 리스너를 다시 달지 않는 걸 라이브러리 소스에서 직접
+  확인한 뒤(생성자와 별개 메서드), 리뷰가 제시한 "인스턴스 1개 유지 + setCharacter 재사용"을 그대로
+  채택했다. 다만 `HanziWriter.create(target, ...)`의 `target`은 인스턴스가 계속 붙잡고 있는 실제 DOM
+  노드라, 모달이 재렌더될 때마다(`m.innerHTML = strokeModalHtml()`) `#strokeStage` placeholder가 매번
+  새로 생기는 기존 구조에서는 target 노드 자체도 함께 유지해야 재사용이 실제로 의미가 있었다(그렇지
+  않으면 writer는 살아있어도 화면에 그려지지 않는 detached 노드에 그리게 된다) — 그래서 리뷰의 폴백
+  옵션("target div 재사용")도 함께 적용했다: `strokeUi.stageEl`(영구 DOM 노드)을 앱 생애주기 동안 하나
+  유지하고, 렌더마다 새로 생기는 placeholder를 `replaceWith()`로 그 자리에서 `stageEl`로 바꿔치기한다.
+  `openStrokeModal`/`closeStrokeModal`이 하던 `strokeUi.writer = null` 리셋을 제거해 모달을 닫아도
+  인스턴스가 죽지 않게 했다.
+  - **재현 테스트 고정**(`tests/stroke-writer-reuse.test.mjs`, 신규): 실제 HanziWriter/document 대신
+    `create()` 호출 횟수를 세는 가짜 객체를 주입해 (1) 20회 열닫 후 `create()` 호출 1회, (2) 글자 탭
+    전환·모드 전환·"다시 재생" 모두 `create()` 없이 `setCharacter()`로만 처리, (3) 재사용 시 실제 그리는
+    target 노드도 계속 같은 노드를 가리키는지 3개 테스트로 고정
+- 🟡2 (`korean` 캡처가 정답 노출, `clozeOf`) — 번역 캡처 정규식이 `(.+)$`로 문자열 끝까지 탐욕적으로
+  잡아, ex에 예문이 두 개 이어 붙어 있으면 뒤 문장(정답 한자 포함)이 통째로 `korean`에 섞여 프롬프트
+  화면(정답 공개 전)에 그대로 노출되는 문제였다. ①캡처 그룹을 `(.+)$` 대신 다음 한자(CJK, `isCJK`와
+  동일한 3개 유니코드 범위)가 나오기 전까지만 잡는 문자 클래스로 제한 ②그래도 `korean`에 정답(hz)이
+  그대로 남아 있으면 `＿`로 빈칸 처리하는 이중 방어를 추가했다. 실제로는 ①만으로 hz(항상 한자)가
+  `korean`에 남는 경로가 없어 ②가 트리거되는 걸 관찰하지는 못했지만(hz가 등장하는 순간 문자 클래스가
+  이미 매칭을 멈춘다), 리뷰가 명시한 "이중 방어" 그대로 코드에 남겨 뒀다 — 향후 정규식을 바꾸는 사람이
+  실수해도 마지막 방어선이 되도록.
+  - **테스트**: 예문 2문장 ex(첫 문장이 hz, 뒷 문장이 무관한 별개 문장)에서 `korean`에 뒷 문장의 한자가
+    전혀 섞이지 않는지, 번역에 hz가 괄호로 병기된 경우에도 `korean`에 hz가 그대로 남지 않는지 확인
+- 🟡3 (숫자·라틴 혼재 문장 조각남, `clozeChunks`) — `CLOZE_PUNCT`가 한자·중국어 문장부호만 포함해
+  `我有3个苹果。`처럼 아라비아 숫자가 중간에 끼면 청크가 `个苹果。`로 잘려 앞부분(`我有3`)이 유실됐다.
+  아라비아 숫자(0-9)와 반각 문장부호(`.,!?`)를 `CLOZE_PUNCT`에 추가해 청크 연결자로 취급했다. 반각
+  마침표 추가는 부수적으로 다른 버그도 고쳤다 — 예문이 반각 `.`로 끝나면(전각 `。`가 아니면) 문장 뒤
+  `(병음) — 번역` 매칭이 마침표 하나 때문에 실패해 병음·번역이 통째로 유실되던 문제. 순수 숫자/ASCII로만
+  이뤄진 청크가 문장 후보로 잘못 채택되지 않도록 `clozeOf`의 후보 선택에 `[...c].some(isCJK)` 방어도
+  덧붙였다(hz가 항상 한자라 사실상 이미 보장되지만, 리뷰 문구를 그대로 코드에 남겼다).
+  - **테스트**: `我有3个苹果。` 전체가 한 문장으로 잡히는지, 반각 마침표 예문의 병음·번역이 유실되지
+    않는지, `clozeChunks`가 숫자/반각 부호를 연결자로만 쓰고 한자 없는 라틴 구간까지 잇지는 않는지 확인
+- 💡 저비용 5건:
+  - `cz.pinyin` 미소비 — cloze 카드 정답 공개 화면에 문장 전체(`cz.sentence`)와 그 병음(`cz.pinyin`)을
+    한 줄 추가해 보여주도록 소비처를 만들었다(추출 제거 대신 소비 쪽 선택 — 이미 화면에 문장 원문을
+    보여주는 자리라 자연스럽게 붙었다)
+  - 첫 획순 탭 2.2MB 동기 파싱 — `renderStrokeModal()`이 데이터 미로딩 상태면 "불러오는 중" 카드를 먼저
+    그리고 `setTimeout(..., 0)`으로 다음 틱에 `ensureStrokeData()`(파싱)+재렌더를 미루도록 분리(파싱
+    자체는 여전히 처음 한 번만 발생, 그 시점만 한 틱 늦춘 것)
+  - 한자 없는 단어의 죽은 획순 버튼 — 단어 목록 상세의 "획순" 버튼을 `strokeCharsOf(w.hz).length` 조건부
+    렌더로 바꿔, hz에 한자가 하나도 없는 단어에서는 버튼 자체가 안 뜨게 함(write 카드의 "획순 보기"
+    버튼은 `canWrite` 조건상 이미 hz에 한자가 있을 때만 뜨는 경로라 손대지 않았다)
+  - `sourceMappingURL` 주석 제거(존재하지 않는 `.map` 파일을 가리키던 죽은 참조) / `strokeDataFailed`
+    (파싱 자체 실패 — 새로고침 안내)와 글자 자체의 데이터 없음(정상, "준비 중") 문구를 구분
+  - `docs/STROKE_DATA.md`에 gzip 수치 기록 — `index.html` 전체 raw 약 3.36MB, gzip 약 1.52MB(정적
+    호스팅은 보통 gzip/br을 자동 적용하므로 실사용 체감에 가까운 수치), `#stroke-data` JSON만 gzip하면
+    약 0.89MB
+- 변경 지점 (index.html): `// ---------- cloze (예문 빈칸) ----------`(`CLOZE_PUNCT`, `clozeChunks`,
+  `clozeOf`), `renderReview()`의 `t === 'cloze'` 정답 공개 분기, `wordItemHtml()`의 "획순" 버튼,
+  `// ---------- stroke writer (획순 연습) ----------` 섹션 전체(`strokeUi`, `openStrokeModal`,
+  `closeStrokeModal`, `strokeModalHtml`, `strokeLoadingHtml`(신규), `renderStrokeModal`,
+  `mountStrokeWriter`), Hanzi Writer 라이브러리 스크립트 블록 끝의 `sourceMappingURL` 주석
+- 검증:
+  - 기존 79개(cloze 10 포함) + 신규 `cloze.test.mjs` 5개(🟡2 2개, 🟡3 3개) + 신규
+    `tests/stroke-writer-reuse.test.mjs` 3개(🟡1) = **총 87개 전부 통과**
+  - `<script>` 7블록(JSON 3 + JS 4) 각각 `JSON.parse`/`new Function()`으로 파싱 — 오류 0
+- 타협/미해결:
+  - 🟡2의 "이중 방어"(정답 blank 처리)는 코드로는 존재하지만, 현재 정규식 설계(①만으로 hz가 항상
+    차단됨)에서는 실제로 트리거되는 입력을 만들지 못해 그 경로 자체를 직접 때리는 테스트는 못 만들었다
+    — 대신 관찰 가능한 계약("korean에 정답 한자가 남지 않는다")을 두 재현 시나리오로 고정했다
+  - 획순 데이터 지연 파싱을 `setTimeout(0)`으로 한 틱 미루는 것의 실제 체감(모달이 얼마나 빨리 뜨는지)은
+    브라우저 환경에서 직접 확인하지 못했다 — 파싱 자체의 소요 시간은 그대로이므로 "모달이 늦게 뜨는 것"을
+    "불러오는 중이 잠깐 보이는 것"으로 바꾼 정도의 개선이다
+  - "한자 없는 단어의 죽은 획순 버튼"은 단어 목록 상세 진입점만 고쳤다(요청·리뷰 재현이 이 지점을
+    가리켰고, write 카드 진입점은 애초에 도달 불가능한 경로라 변경 대상이 아니었다)
+
+---
+
+## 2026-09-12 예문 빈칸 채우기(cloze) 복습 카드 추가
+
+- 요지: ex(예문) 필드에 단어의 hz가 원형 그대로 포함된 단어에 한해, 예문의 중국어 문장부를 빈칸(＿)
+  처리하고 병음을 입력해 채우는 새 복습 카드 유형 'cloze'를 추가했다. ex는 두 형식이 공존한다는 전제
+  그대로 지원한다 — 규격형 "中文例句 (pīnyīn) — 한국어 번역"(docs/EXAMPLE_WORKER.md 워커 생성)과
+  자유 텍스트(사용자 수동 입력, 중국어 문장 유무 자유). 판정은 순수 함수 `clozeOf(w)`로 분리해 ex 파싱
+  로직이 렌더링·SRS 로직과 섞이지 않게 했다.
+- 변경 지점 (index.html):
+  - `// ---------- cloze (예문 빈칸) ----------` 섹션 신설("reading check" 섹션 다음, "week" 섹션
+    앞): `CLOZE_PUNCT`(중국어 문장부호 화이트리스트), `clozeChunks(text)`(ex 전체에서 한자+중국어
+    문장부호로만 이어진 연속 구간들을 추출 — 괄호 안 병음은 라틴 문자, 번역은 한글이라 이 문자 집합에
+    없어 자연히 끊긴다), `clozeOf(w)`(순수 함수 — hz가 포함된 구간을 문장으로 채택하고, 이어지는
+    "(병음) — 번역"이 있으면 함께 추출. hz 미포함/ex 없음이면 `null`)
+  - `pickType(w)`: `canCloze = !!clozeOf(w)` 추가. `mode==='cloze'`면 `canCloze ? 'cloze' : 'recog'`
+    (기존 write/speak와 동일한 폴백 패턴). mix 모드 pool에도 `canCloze && settings.clozeCards!==false`일
+    때만 'cloze' 추가(다른 유형과 동률 — 균등 무작위 pool에 한 항목만 늘어남)
+  - `reviewModeBarHtml()`: chipDefs에 `['cloze','예문']` 추가. `S.words.some(w=>!!clozeOf(w))`로
+    전체 단어장에 cloze 가능 단어가 있는지 계산해 0개면 칩 disabled + 사유 문구(clozeHint) 표시. mix
+    모드 토글에도 "예문 카드 포함"(`#rvClozeCards`) 추가(기존 손글씨/발음 토글과 동일 패턴).
+    `bindReviewModeBar()`에 리스너 추가
+  - `renderReview()`: `t === 'cloze'` 분기 신설(read/produce 분기 바로 앞) — 빈칸 문장(`cz.blanked`,
+    `.cloze-sentence.hz-inline`) + (있으면) 문장 한국어 번역 표시 → 병음 입력(`#ans`)은 read/produce와
+    완전히 동일한 answer-row UI 재사용. `checkAnswer()`는 수정 없이 그대로 재사용(session.cur가 채점
+    대상 단어 자체라 변조 관대화 등 기존 로직이 그대로 적용됨). 정답 공개 시 `answer(true)`로 완성
+    문장(raw ex 텍스트)·병음·뜻을 보여주고, "문장 듣기"(`data-act="speakCloze"`) 버튼으로 `cz.sentence`
+    전체를 TTS 재생
+  - `$('#view')` 클릭 위임에 `case 'speakCloze'` 추가(기존 `[data-act]` 선택자 그대로 재사용)
+  - 듣기(연속 재생) 모드: `listenSpeakCurrent()`에 "한자→뜻→예문"(`itemMode==='hzMeanEx'`) 체인 추가 —
+    한자 발음 후 뜻(한국어 TTS) 재생이 끝나면 `clozeOf(w)`로 얻은 문장을 중국어로 이어 재생(없으면
+    조용히 건너뜀, 새 파싱 없이 기존 판정 재사용이라 저비용). `renderListen()`의 "항목 구성" 칩 행에
+    "한자→뜻→예문" 칩 추가
+  - CSS: `.cloze-sentence`(신규, 예문 빈칸 프롬프트용 — 기존 `.example`은 보조 캡션 크기라 재사용하지
+    않고, `.prompt-mean`과 `.example` 사이 크기로 신설) + 기존 `.hz-inline`을 함께 적용해 중국어 폰트로
+    표시
+- 검증:
+  - 기존 5개 테스트 파일 69개 전부 그대로 통과. 단, `session-queue.test.mjs`는 `pickType`이 새로
+    `clozeOf`를 참조하게 되면서 그 함수를 로드하지 않는 이 테스트 파일에서 `ReferenceError`가 나 깨졌다
+    — `clozeOf` 로직 자체(=cloze.test.mjs가 검증)와 무관한 최소 스텁(`function clozeOf(){return null;}`)
+    한 줄을 기존 `toast`/`save`/`render` 스텁과 같은 자리에 추가해 해결
+  - 신규 `tests/cloze.test.mjs` 10개(규격형 2, 자유 텍스트 2, hz 미포함 1, ex 없음/undefined/null 3,
+    괄호 없는 중국어만 1, 다중 출현 hz 1) 전부 통과 — 총 79개
+  - `<script>` 7블록(JSON 3 + JS 4) 각각 `JSON.parse`/`new Function()`으로 파싱 — 오류 0
+- 타협/미해결:
+  - "정답 보기"(빈칸을 안 풀고 바로 정답 확인)는 recog 카드처럼 별도 버튼을 새로 만들지 않고, 기존
+    read/produce의 "모르겠어요"(`data-act="giveup"`) 버튼을 그대로 재사용했다 — 결과적으로 동일하게
+    채점 없이 정답을 공개하는 동작이라, 계획의 "입력 UI·checkAnswer 재사용" 원칙을 "버튼도 그대로
+    재사용"으로 해석했다. 문구가 "정답 보기"가 아니라 "모르겠어요"인 점만 계획과 다르다.
+  - `clozeOf`의 "중국어 문장부" 판정은 정규식 기반 문자 집합 매칭이라, ex에 괄호 안 병음이 아닌 다른
+    라틴 문자 텍스트(예: 영어 단어가 섞인 메모)가 낀 자유 텍스트에서도 규격형처럼 오인해 pinyin/korean을
+    억지로 채우려 시도할 수 있다 — 다만 정규식이 실패하면 조용히 undefined로 남기므로(cloze.test.mjs의
+    "자유 텍스트: 괄호가 있어도…" 케이스로 확인) 안전하게 실패한다.
+  - 듣기 모드 "한자→뜻→예문"에서 예문 재생 목소리는 한자 단어 재생과 같은 `pickZhVoice()`를 그대로
+    쓴다 — 문장이라고 다른 음색/속도를 쓰지는 않는다(요청에 없었고, 저비용 원칙에 맞춰 최소 변경).
+
+---
+
+## 2026-09-12 획순 연습 기능 추가 (Hanzi Writer 임베드)
+
+- 요지: 단어 상세와 손글씨(write) 카드에서 한자 획순 애니메이션을 보고(보기 모드) 따라 써 볼 수 있게(연습
+  모드, quiz) 했다. 라이브러리(Hanzi Writer)와 데이터(hanzi-writer-data, 빈도 상위 1000자)는 기존 원칙대로
+  다운로드해서 index.html에 통째로 인라인 임베드했다(외부 CDN 참조 없음).
+- 데이터: `hanziDB.csv`(Rudd Fawcett, MIT — Jun Da 현대 중국어 한자 빈도 목록 기반)에서 빈도 순위 1~1000위
+  글자를 뽑아 `hanzi-writer-data`(Make Me a Hanzi 경유, Arphic Public License)에서 글자별 획순 JSON을
+  전부 내려받았다. **1000/1000자 전부 확보(커버리지 100%)** — 준비 중인 글자 없음. HSK 레벨 분포는
+  HSK1 159·HSK2 136·HSK3 195·HSK4 257(1~4 합계 747, ~75%)·HSK5 192·HSK6 52·미등재 9 — 순수 빈도 기반이라
+  HSK1~4를 "대체로" 커버하지만 정확히 일치하지는 않는다(의도한 동작).
+- 변경 지점 (index.html):
+  - 파일 상단 라이선스 주석: Hanzi Writer(MIT)·hanzi-writer-data(Arphic)·빈도표 출처(hanziDB.csv, 재현용,
+    앱 미포함) 3줄 추가
+  - 임베드: `#stroke-data`(JSON, ~2.2MB, 1000자) — 기존 py-dict/mmah-data 옆. Hanzi Writer v3.7.3 minified
+    JS — 기존 HanziLookup 라이브러리 스크립트 바로 앞
+  - `// ---------- stroke writer (획순 연습) ----------` 섹션 신설(`padPick` 다음, `events` 앞):
+    `ensureStrokeData`(지연 파싱 — 획순 기능을 처음 열 때만 `#stroke-data`를 `JSON.parse`), `strokeCharsOf`
+    (단어→중복 제거된 한자 배열, 순수 함수), `hasStrokeData`(순수 함수), `strokeUi` 상태,
+    `openStrokeModal`/`closeStrokeModal`/`strokeModalHtml`/`renderStrokeModal`/`mountStrokeWriter`
+    (HanziWriter.create + animateCharacter/quiz)
+  - 진입점 ①: `wordItemHtml()`의 단어 상세 버튼 행에 "획순" 버튼 추가(`data-act="strokeOpen"
+    data-strokehz="..."`) — 버튼 4개로 늘어나 `.wbody .row`에 `flex-wrap:wrap` 추가(좁은 화면에서 2x2로
+    줄바꿈, 기존 3버튼 레이아웃과 호환)
+  - 진입점 ②: `write` 카드 정답 공개 화면(`t === 'write' && p`)에 "획순 보기" 버튼 추가
+  - `$('#view')` 클릭 위임의 `switch(d.act)`에 `case 'strokeOpen'` 추가(기존 선택자에 이미 `[data-act]`가
+    있어 선택자 목록 변경 불필요)
+  - `#strokeModal`(고정 오버레이, `#app` 안 `#toast` 다음) 전용 클릭 위임 신설 — `#view` 밖이라 탭 전환과
+    무관하게 별도로 둠(닫기/글자 탭/보기·연습 모드 전환/다시 재생·시작)
+  - CSS: `.strokemodal`/`.modalcard`/`.modalhead`/`.strokestage` 신설(그 외 모달 내부는 기존
+    `.chiprow`/`.chip`/`.card.empty`/`.padmsg`/`.iconbtn` 재사용 — 새 클래스 최소화)
+  - 설정 화면에 `<details>` 접이식 "오픈소스 고지" 섹션 신설("데이터" 섹션 다음) — HanziLookup·Hanzi
+    Writer·hanzi-writer-data·pinyin-pro 4건 + docs/STROKE_DATA.md 포인터
+  - 신규 문서: `docs/STROKE_DATA.md` — 획순 데이터/라이브러리 재임베드 절차(빈도표에서 글자 선정 →
+    hanzi-writer-data 일괄 다운로드 → index.html 치환 → 검증)
+- 파일 크기: 1,199,142 → 3,514,853 bytes (+2.21MB, 대부분 `#stroke-data` JSON)
+- 검증:
+  - 기존 `node tests/sandhi.test.mjs` 12, `checkword-checkanswer.test.mjs` 23, `session-queue.test.mjs` 5,
+    `week-queue.test.mjs` 18 = 58개 그대로 통과
+  - 신규 `node tests/stroke-chars.test.mjs` 11개(strokeCharsOf 중복 제거·공백/비한자 제외·null 안전,
+    hasStrokeData 존재/부재/미로딩/prototype 오염 방지) 전부 통과 — 총 69개
+  - `<script>` 7블록(설정 스크립트·py-dict·mmah-data·stroke-data·Hanzi Writer 라이브러리·HanziLookup
+    라이브러리·본문 앱 스크립트) 각각 잘라내 `new Function()`/`JSON.parse`로 파싱 — 오류 0
+  - 전역 이름 충돌 확인: `HanziWriter`(라이브러리가 노출하는 전역)가 라이브러리 정의 이전 어디서도
+    쓰이지 않음을 확인 — 기존 `HanziLookup`(별개 손글씨 인식 라이브러리)과 이름공간 겹치지 않음
+- 타협/미해결:
+  - 실제 iOS Safari에서의 로드 체감(파싱 지연 유무)은 이 환경에서 직접 확인할 수 없었다 — `#stroke-data`
+    JSON.parse를 획순 기능 최초 사용 시점으로 미뤄 두었지만(요청사항), 브라우저가 2.2MB 텍스트 노드
+    자체를 HTML 파싱 단계에서 들고 있어야 하는 비용은 그대로다(기존 mmah-data/py-dict와 동일한 방식이라
+    새로운 문제는 아님)
+  - 퀴즈(연습) 모드의 "힌트"는 별도 버튼 대신 라이브러리 내장 `showHintAfterMisses:1`(1회 틀리면 자동
+    힌트) + `markStrokeCorrectAfterMisses:3`(3회 틀리면 관대하게 통과)로 처리했다 — 계획 문구("힌트")는
+    수동 버튼을 뜻할 수도 있었으나, "라이브러리 내장 기능 사용"이라는 계획의 명시적 제약과 앱의 기존
+    관대화 기조(성조 변조 채점 등)에 맞춰 자동 힌트 쪽을 택했다
+  - 모달은 배경 탭 또는 닫기 버튼으로만 닫힌다 — Esc 키 닫기는 계획에 없어 추가하지 않았다
+
+---
+
 ## 2026-09-12 병음 변조(tone sandhi) 안내 및 채점 관대화
 
 - 요지: 표기(성조 정서법 표준)는 그대로 두고, 실제 발음이 표기와 달라지는 3가지 규칙(3성 연쇄, 不+4성, 一 성조 변화)을

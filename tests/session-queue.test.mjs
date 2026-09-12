@@ -42,6 +42,7 @@ const source = [
   'const speechOK = false;',
   'const ttsOK = false;',
   'let speakUnsupportedNotified = false;',
+  'function clozeOf(){ return null; }', // pickType이 참조 — 이 테스트는 cloze 판정 자체를 다루지 않으므로(cloze.test.mjs 참고) 최소 스텁
   isCjkSource,
   'let S = { words: [], log: {}, settings: { mode:"recog", weekWeights:{} } };', // mode:'recog' — pickType이 mix 랜덤 없이 결정적으로 동작
   'let session = { active:false, finished:false, extra:false, queue:[], cur:null, curExtra:false, type:null, revealed:false, pending:null, done:0, ok:0 };',
