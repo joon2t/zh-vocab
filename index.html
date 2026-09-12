@@ -9800,6 +9800,59 @@ function pinyinLooksValid(input){
   const p = parsePinyin(input);
   return p.length > 0 && p.every(x => /^[a-z]+$/.test(x.l));
 }
+// 변조(성조가 표기와 다르게 실제로 발음되는 현상, tone sandhi) 안내. 표기(저장값)는 절대 바꾸지 않고, 실제 발음만 계산해서 알려준다.
+function sandhiInfo(pyCanon, hz){
+  const syl = parsePinyin(pyCanon);
+  if (!syl.length) return { changed:false, spoken:[], notes:[], origT:[] };
+  const origT = syl.map(x => x.t);
+  const out = syl.map(x => ({ l:x.l, t:x.t, rule:null })); // rule: 어떤 규칙이 이 음절을 바꿨는지 (R1/R2/R3), 채점 관대화 범위 판단에 쓰인다
+  const notes = [];
+  const chars = hz ? [...String(hz).replace(/\s+/g, '')].filter(ch => { const c = ch.codePointAt(0); return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0xF900 && c <= 0xFAFF); }) : [];
+  const aligned = chars.length === syl.length ? chars : null;
+
+  // R1: 3성이 연달아 오면 마지막 글자만 3성이고 그 앞은 2성으로 발음
+  let i = 0;
+  while (i < out.length) {
+    if (origT[i] === 3) {
+      let j = i;
+      while (j < out.length && origT[j] === 3) j++;
+      if (j - i >= 2) {
+        for (let k = i; k < j - 1; k++) { out[k].t = 2; out[k].rule = 'R1'; }
+        notes.push('3성이 연달아 오면 마지막 글자만 3성으로 읽고 앞 글자는 2성으로 발음해요.');
+      }
+      i = j;
+    } else i++;
+  }
+
+  if (aligned) {
+    // R2: 不(bu4) 뒤에 4성이 오면 2성(bú)으로 발음
+    aligned.forEach((ch, idx) => {
+      if (ch === '不' && origT[idx] === 4 && idx + 1 < origT.length && origT[idx + 1] === 4) {
+        out[idx].t = 2; out[idx].rule = 'R2';
+        notes.push('不는 뒤에 4성이 오면 2성(bú)으로 발음해요.');
+      }
+    });
+    // R3: 一(yi1) 뒤 성조에 따라 2성 또는 4성으로 발음. 단독으로 쓰이거나 단어 끝자리면 그대로 둔다.
+    // 단, 숫자·순서·날짜(一月/一号/一楼 등)를 셀 때는 표준 발음이 yī 그대로라 이 규칙이 맞지 않는 경우가 많다.
+    // 그래서 채점 관대화(정답 자동 통과) 대상에서는 항상 제외한다 — 안내(참고)에만 쓴다.
+    aligned.forEach((ch, idx) => {
+      if (ch !== '一' || aligned.length < 2 || idx === aligned.length - 1) return;
+      const nextT = origT[idx + 1];
+      const note = '一는 뒤 글자에 따라 yí/yì로 바뀌는 경우가 많아요. 단, 숫자·순서·날짜를 셀 때는 yī 그대로예요.';
+      if (nextT === 4) { out[idx].t = 2; out[idx].rule = 'R3'; notes.push(note); }
+      else if (nextT === 1 || nextT === 2 || nextT === 3) { out[idx].t = 4; out[idx].rule = 'R3'; notes.push(note); }
+    });
+  }
+
+  const changed = out.some((x, idx) => x.t !== origT[idx]);
+  return { changed, spoken: out, notes: [...new Set(notes)], origT };
+}
+function sandhiSpokenCanon(info){ return info.spoken.map(x => x.l + (x.t || '')).join(' '); }
+// 채점(정답 자동 통과)에 관대화를 적용할 때 쓰는 발음. excludeIdx에 담긴 위치의 一(R3)만 원래 성조로 되돌려서 제외한다 —
+// 숫자·순서·날짜를 셀 때 표준 발음이 그대로 yī인 一은 사전(pyd.w)에 그렇게 등재돼 있으므로, 그 경우만 관대화에서
+// 뺀다. 사전에 등재되지 않은 一(一起·一样 등)은 변조 발음을 그대로 정답으로 허용한다.
+function sandhiGradableCanon(info, excludeIdx){ return info.spoken.map((x, idx) => x.l + ((x.rule === 'R3' && excludeIdx && excludeIdx.has(idx) ? info.origT[idx] : x.t) || '')).join(' '); }
+function sandhiGradableChanged(info, excludeIdx){ return info.spoken.some((x, idx) => x.rule && !(x.rule === 'R3' && excludeIdx && excludeIdx.has(idx))); }
 
 // ---------- storage ----------
 function fresh(){ return { version:1, words:[], log:{}, settings:{ mode:'mix', autoAudio:true } }; }
@@ -10027,8 +10080,21 @@ function ensureDict(){
 }
 const isCJK = ch => { const c = ch.codePointAt(0); return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) || (c >= 0xF900 && c <= 0xFAFF); };
 const fmtSyl = x => marks(x.l + (x.t || ''));
+// 一(R3) 채점 관대화를 제외할 위치를 계산한다. 一월/一호처럼 사전(pyd.w)에 등재돼 있고 그 등재 병음이
+// 一를 1성(yī) 그대로 표기한 경우만 제외 대상 — 사전에 없는 一 단어(一起·一样 등)는 관대화를 허용한다.
+function r3ExcludeSet(hz){
+  const idxs = new Set();
+  if (!ensureDict()) return idxs;
+  const key = String(hz||'').replace(/\s+/g, '');
+  const wd = pyd.w[key]; if (!wd) return idxs;
+  const chars = [...key];
+  const wdSyl = parsePinyin(wd);
+  chars.forEach((ch, i) => { if (ch === '一' && wdSyl[i] && wdSyl[i].t === 1) idxs.add(i); });
+  return idxs;
+}
 function checkWord(hz, pyCanon){
   const issues = [];
+  issues.sandhiNotes = []; // 변조 발음과 일치해서 이슈 대신 통과시킨 안내 (저장 여부 판단에는 영향 없음)
   if (!ensureDict()) return issues;
   const chars = [...hz.replace(/\s+/g, '')].filter(isCJK);
   const sy = parsePinyin(pyCanon);
@@ -10038,14 +10104,43 @@ function checkWord(hz, pyCanon){
   const wd = pyd.w[key];
   if (wd && wd === pyCanon) return issues;
   const ref = wd ? parsePinyin(wd) : null;
+  // 변조는 "사용자가 적은 값"이 아니라 "참조 독음"(단어 사전 wd, 없으면 각 글자의 대표 독음) 기준으로 계산해야 한다.
+  // 사용자 입력 기준으로 계산하면 변조 미적용 음절은 항상 spoken[i]===typed[i]가 되어(자기 자신과 비교하는 셈),
+  // 무관한 오타까지 "변조라서 맞다"고 오판정하게 된다.
+  const refSyl = chars.map((ch, i) => {
+    if (ref && ref[i]) return ref[i];
+    const raw = pyd.c[ch];
+    if (raw) { const r0 = parsePinyin(raw.split(',')[0].trim())[0]; if (r0) return r0; }
+    return sy[i]; // 사전에 없는 글자는 참조를 만들 수 없으니 입력값으로 대체(아래에서 raw 없으면 어차피 건너뜀)
+  });
+  const refCanon = refSyl.map(x => x.l + (x.t || '')).join(' ');
+  const sandhi = sandhiInfo(refCanon, hz);
   chars.forEach((ch, i) => {
     const typed = sy[i];
     const raw = pyd.c[ch]; if (!raw) return;
     let readings = raw.split(',').map(r => parsePinyin(r)[0]).filter(Boolean);
     if (ref && ref[i]) readings = [ref[i]].concat(readings);
     const same = readings.filter(r => r.l === typed.l);
-    if (!same.length) issues.push({ level:'hard', ch, msg:`<span class="hz-inline">${esc(ch)}</span>의 병음은 ${esc(readings.map(fmtSyl).join(' / '))}인데 ${esc(fmtSyl(typed))}로 적었어요.` });
-    else if (typed.t && !same.some(r => r.t === typed.t)) issues.push({ level:'soft', ch, msg:`<span class="hz-inline">${esc(ch)}</span>는 보통 ${esc([...new Set(same.map(fmtSyl))].join(' / '))}로 읽어요 (입력: ${esc(fmtSyl(typed))}).` });
+    if (!same.length) { issues.push({ level:'hard', ch, msg:`<span class="hz-inline">${esc(ch)}</span>의 병음은 ${esc(readings.map(fmtSyl).join(' / '))}인데 ${esc(fmtSyl(typed))}로 적었어요.` }); return; }
+    if (!typed.t || same.some(r => r.t === typed.t)) return;
+    // 3성 연쇄(R1)·不(R2) 변조로 인한 발음만 면제한다. 一(R3)는 숫자·순서·날짜 예외가 많아 채점 관대화에서 제외.
+    const sp = sandhi.changed ? sandhi.spoken[i] : null;
+    let exempt = !!(sp && sp.rule && sp.rule !== 'R3' && sp.t === typed.t && sp.t !== sandhi.origT[i]);
+    // refCanon은 사전에 없는 단어의 경우 다음자(多音字)의 대표 독음으로 조립되므로, 실제로는 없는
+    // 3-3 연쇄(유령 연쇄)를 만들어 R1을 잘못 발동시킬 수 있다. 그래서 R1 면제는 연쇄를 구성하는 구간
+    // 전체(자기 자신 포함 이웃 음절들)의 typed 성조가 refCanon 기준 실제 발음(spoken)과 정확히 일치할
+    // 때만 허용한다 — 하나라도 어긋나면 refCanon 자체가 틀렸다는 뜻이므로 진짜 연쇄로 보지 않는다.
+    if (exempt && sp.rule === 'R1') {
+      let start = i, end = i;
+      while (start > 0 && sandhi.origT[start - 1] === 3) start--;
+      while (end < sandhi.origT.length && sandhi.origT[end] === 3) end++;
+      for (let k = start; k < end; k++) { if (!sy[k] || sy[k].t !== sandhi.spoken[k].t) { exempt = false; break; } }
+    }
+    if (exempt) {
+      issues.sandhiNotes.push(`<span class="hz-inline">${esc(ch)}</span>는 발음(${typed.t}성)으로 적으셨네요 — 표기는 ${esc([...new Set(same.map(fmtSyl))].join(' / '))}가 표준이에요.`);
+    } else {
+      issues.push({ level:'soft', ch, msg:`<span class="hz-inline">${esc(ch)}</span>는 보통 ${esc([...new Set(same.map(fmtSyl))].join(' / '))}로 읽어요 (입력: ${esc(fmtSyl(typed))}).` });
+    }
   });
   return issues;
 }
@@ -10056,6 +10151,17 @@ function issuesHtml(issues, buttons){
     ${issues.map(x => `<div class="issue ${x.level}">${x.msg}</div>`).join('')}
     ${hard ? '' : `<div class="hint">문장 속에서 성조가 바뀌는 글자(不, 一 등)나 경성이면 그대로 저장해도 돼요.</div>`}
     ${buttons || ''}</div>`;
+}
+// 변조 발음 안내 HTML. key를 넘기면 같은 key로는 이유 설명(notes)을 한 번만 보여주고, 이후엔 "실제 발음" 한 줄만 보여준다.
+const sandhiSeen = new Set();
+function sandhiHintHtml(pyCanon, hz, key){
+  const info = sandhiInfo(pyCanon, hz);
+  if (!info.changed) return '';
+  const first = !key || !sandhiSeen.has(key);
+  if (key) sandhiSeen.add(key);
+  // 一(R3)가 섞인 변조는 숫자·순서·날짜 예외가 있어 단정할 수 없으므로 라벨을 완화한다.
+  const label = info.spoken.some(x => x.rule === 'R3') ? '발음 참고' : '실제 발음';
+  return `<div class="hint" style="margin-top:2px">${label}: ${esc(marks(sandhiSpokenCanon(info)))}${first && info.notes.length ? `<br>${esc(info.notes.join(' '))}` : ''}</div>`;
 }
 
 // ---------- words ----------
@@ -10188,6 +10294,7 @@ function renderReview(v){
   const answer = (showHz) => `
     ${showHz ? tiles(w.hz, 96) : ''}
     <div class="pinyin">${esc(marks(w.py))}</div>
+    ${sandhiHintHtml(w.py, w.hz, w.id + ':card')}
     <div class="meaning">${esc(w.mean)}</div>
     ${w.ex ? `<div class="example"><span class="hz-inline">${esc(w.ex)}</span></div>` : ''}`;
 
@@ -10211,7 +10318,7 @@ function renderReview(v){
     if (!p) {
       const prompt = session.writeMode === 'audio'
         ? `<p class="hint" style="margin-top:4px">발음을 듣고 한자를 손으로 써 보세요</p><button class="iconbtn" data-act="speak">다시 듣기</button>`
-        : `<div class="pinyin">${esc(marks(w.py))}</div><p class="hint">병음을 보고 한자를 손으로 써 보세요</p>`;
+        : `<div class="pinyin">${esc(marks(w.py))}</div>${sandhiHintHtml(w.py, w.hz, w.id + ':write')}<p class="hint">병음을 보고 한자를 손으로 써 보세요</p>`;
       body = `<section class="card center">${prompt}
         <div id="whint" class="meaning" style="min-height:28px;margin-top:6px">${session.hint ? esc(w.mean) : `<button class="link" data-act="hint">뜻 힌트</button>`}</div>
         <div id="ansTiles">${answerTiles(chars.length, ans)}</div>
@@ -10262,6 +10369,7 @@ function renderReview(v){
         <div class="stamp pop ${p.result === 'fail' ? 'wrong' : ''}">${p.result === 'fail' ? '错' : '对'}</div>
         <div class="verdict">${p.result === 'fail' ? (p.gaveUp ? '정답을 확인하세요' : '틀렸어요') : '맞았어요'}</div>
         ${p.result === 'fail' && p.typed ? `<div class="typed">${esc(p.typed)}</div>` : ''}
+        ${p.sandhiNote ? `<div class="hint">${esc(p.sandhiNote)}</div>` : ''}
         ${answer(!isRead)}
         <div class="gap"></div>${audio}
         <div class="gap"></div>
@@ -10373,8 +10481,30 @@ function checkAnswer(){
   const inp = $('#ans'); if (!inp) return;
   const typed = inp.value.trim();
   if (!typed) { inp.focus(); return; }
-  const ok = canon(typed) === session.cur.py || (!/[\d\s]/.test(typed) && loose(typed) === loose(session.cur.py));
-  session.pending = { result: ok ? 'pass' : 'fail', typed: marks(typed) || typed, gaveUp:false };
+  const w = session.cur;
+  const typedCanon = canon(typed);
+  let ok = typedCanon === w.py || (!/[\d\s]/.test(typed) && loose(typed) === loose(w.py));
+  let sandhiNote = '';
+  if (!ok) {
+    const info = sandhiInfo(w.py, w.hz);
+    // 3성 연쇄·不 변조, 그리고 사전에 등재된(숫자·순서·날짜) 一가 아닌 一 변조는 정답으로 관대화한다.
+    const excludeIdx = r3ExcludeSet(w.hz);
+    if (sandhiGradableChanged(info, excludeIdx)) {
+      const gradableCanon = sandhiGradableCanon(info, excludeIdx);
+      const bySandhi = typedCanon === gradableCanon || (!/[\d\s]/.test(typed) && loose(typed) === loose(gradableCanon));
+      // 안내 문구는 채점용 gradableCanon(一 일부를 되돌린 값)이 아니라 실제 발음(R3 포함 전체 변조)을
+      // 보여줘야 한다 — 그래야 같은 화면의 sandhiHintHtml("실제 발음: …")과 모순되지 않는다.
+      // 一(R3)가 섞이면 숫자·순서·날짜 예외가 있어 단정할 수 없으므로 힌트 라벨과 같은 원칙으로 완화한다.
+      if (bySandhi) {
+        ok = true;
+        const spokenTxt = marks(sandhiSpokenCanon(info));
+        sandhiNote = info.spoken.some(x => x.rule === 'R3')
+          ? `표기는 ${marks(w.py)}예요. 발음 참고: ${spokenTxt} (숫자·순서·날짜를 셀 때 一는 yī 그대로예요.)`
+          : `표기는 ${marks(w.py)}, 발음은 ${spokenTxt}예요.`;
+      }
+    }
+  }
+  session.pending = { result: ok ? 'pass' : 'fail', typed: marks(typed) || typed, gaveUp:false, sandhiNote };
   render();
 }
 
@@ -10412,7 +10542,9 @@ function renderAdd(v){
     py.addEventListener('input', () => {
       const pv = $('#pyPreview'); const val = py.value.trim();
       if (!val) { pv.innerHTML = '&nbsp;'; pv.classList.remove('bad'); return; }
-      const ok = pinyinLooksValid(val); pv.textContent = ok ? marks(val) : '병음 형식을 확인해 주세요'; pv.classList.toggle('bad', !ok);
+      const ok = pinyinLooksValid(val); pv.classList.toggle('bad', !ok);
+      if (!ok) { pv.textContent = '병음 형식을 확인해 주세요'; }
+      else { pv.innerHTML = esc(marks(val)) + sandhiHintHtml(canon(val), $('#hz').value.trim()); }
       const box = $('#issues'); if (box) box.innerHTML = '';
     });
     if (pad.on) mountPad(); else $('#hz').focus();
@@ -10430,13 +10562,12 @@ function saveOne(force){
   if (!mean) { toast('뜻을 입력해 주세요'); $('#mean').focus(); return; }
   if (findByHz(hz)) { toast(`${hz} 는 이미 있어요. 단어장에서 수정할 수 있어요.`); return; }
   const box = $('#issues');
-  if (!force) {
-    const issues = checkWord(hz, canon(py));
-    if (issues.length) { box.innerHTML = issuesHtml(issues, `<div class="row"><button class="btn" data-act="fixPy">고치기</button><button class="btn primary" data-act="saveAnyway">그대로 저장</button></div>`); box.scrollIntoView({ block:'nearest' }); return; }
-  }
+  const issues = checkWord(hz, canon(py)); // force여도 계산은 해 둔다 — sandhiNotes 안내를 잃지 않기 위해
+  if (!force && issues.length) { box.innerHTML = issuesHtml(issues, `<div class="row"><button class="btn" data-act="fixPy">고치기</button><button class="btn primary" data-act="saveAnyway">그대로 저장</button></div>`); box.scrollIntoView({ block:'nearest' }); return; }
   box.innerHTML = '';
   addWord({ hz, py, mean, ex }); save();
-  toast(`저장됨: ${hz} ${marks(py)}`);
+  const sandhiMsg = issues && issues.sandhiNotes && issues.sandhiNotes.length ? ' · ' + issues.sandhiNotes.join(' ').replace(/<[^>]+>/g, '') : '';
+  toast(`저장됨: ${hz} ${marks(py)}${sandhiMsg}`);
   ['hz','py','mean','ex'].forEach(id => { $('#'+id).value = ''; });
   $('#pyPreview').innerHTML = '&nbsp;';
   $('#hz').focus(); setStatus();
@@ -10484,6 +10615,7 @@ function listHtml(){
             <div id="e-issues"></div>
             <div class="row"><button class="btn" data-act="cancelEdit">취소</button><button class="btn primary" data-save="${w.id}">저장</button></div>`
           : `
+            ${sandhiHintHtml(w.py, w.hz, w.id + ':list')}
             ${iss.length ? issuesHtml(iss) : ''}
             ${w.ex ? `<div class="example" style="margin:${iss.length ? '10px' : '0'} 0 8px"><span class="hz-inline">${esc(w.ex)}</span></div>` : ''}
             <div>단계 ${stagebar(w.stage)} <span style="margin-left:8px">맞음 ${(w.reps||0)-(w.lapses||0)}, 틀림 ${w.lapses||0}</span></div>
@@ -10756,11 +10888,13 @@ $('#view').addEventListener('click', e => {
     const hz = $('#e-hz').value.trim(), py = $('#e-py').value.trim(), mean = $('#e-mean').value.trim(), ex = $('#e-ex').value.trim();
     if (!hz || !mean || !pinyinLooksValid(py)) { toast('한자, 병음, 뜻을 확인해 주세요'); return; }
     const dup = findByHz(hz); if (dup && dup.id !== w.id) { toast('같은 한자가 이미 있어요'); return; }
+    let sandhiMsg = '';
     if (!d.saveForce) {
       const issues = checkWord(hz, canon(py));
       if (issues.length) { $('#e-issues').innerHTML = issuesHtml(issues, `<div class="row"><button class="btn primary" data-save-force="${id}">그대로 저장</button></div>`); return; }
+      if (issues.sandhiNotes && issues.sandhiNotes.length) sandhiMsg = ' · ' + issues.sandhiNotes.join(' ').replace(/<[^>]+>/g, '');
     }
-    Object.assign(w, { hz, py: canon(py), mean, ex }); save(); listState.edit = null; toast('수정했어요'); refreshList(); return;
+    Object.assign(w, { hz, py: canon(py), mean, ex }); save(); listState.edit = null; toast(`수정했어요${sandhiMsg}`); refreshList(); return;
   }
   switch (d.act) {
     case 'reveal': session.revealed = true; session.spoken = false; render(); break;
