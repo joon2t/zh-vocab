@@ -185,6 +185,16 @@
   .labelrow label{margin-bottom:4px}
   .labelrow .link{padding:0 0 4px}
 
+  .wrow{display:flex;align-items:center}
+  .wrow .whead{flex:1;min-width:0;padding-left:6px}
+  .wcheck{display:flex;align-items:center;justify-content:center;width:44px;align-self:stretch;margin:0;padding-left:8px;cursor:pointer}
+  .wcheck input{width:20px;height:20px;margin:0;accent-color:var(--indigo)}
+  .focusbar{background:var(--white);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:10px}
+  .focusbar .fhead{display:flex;justify-content:space-between;align-items:baseline;font-size:14px}
+  .focusbar .chiprow{margin-top:8px}
+  .focusbar .btn{height:44px;font-size:15px}
+  select{width:100%;height:46px;border:1px solid var(--line);border-radius:8px;padding:0 10px;background:var(--white);font-size:15px}
+  input[type=range]{width:100%;accent-color:var(--indigo)}
   .empty{padding:30px 10px;text-align:center;color:var(--ink-2)}
   .empty .tiles{opacity:.9}
 
@@ -9763,7 +9773,7 @@ var HanziLookup=HanziLookup||{};HanziLookup.SubStroke=function(t,i,n,o){"use str
 (function(){
 'use strict';
 const KEY = 'zhvocab_v1';
-const APP_VERSION = '2026-09-13 v4 (동기화 병합·듣기 수정)';
+const APP_VERSION = '2026-09-29 v5 (집중 복습·병음 전환·음성 선택·획순 보강)';
 const DAY = 86400000;
 const INTERVALS = [0, 1, 3, 7, 14, 30, 60, 120]; // days per stage
 let S = null;
@@ -9774,7 +9784,7 @@ const inIframe = (() => { try { return window.self !== window.top; } catch (e) {
 let saveTimer = null, saveRetries = 0;
 let tab = 'review';
 let session = { active:false, finished:false, extra:false, queue:[], cur:null, curExtra:false, type:null, revealed:false, pending:null, done:0, ok:0, graded:0 };
-let listState = { q:'', open:null, edit:null, flagOnly:false, weekOpen:{} };
+let listState = { q:'', open:null, edit:null, flagOnly:false, focusOnly:false, weekOpen:{} };
 const WEEK_LEVELS = [['high','집중'], ['normal','보통'], ['low','여유'], ['off','쉬는 주차']];
 let addState = { bulk:false };
 let confirmDelete = null;
@@ -10106,7 +10116,25 @@ let voices = [];
 function loadVoices(){ try { voices = speechSynthesis.getVoices() || []; } catch (e) { voices = []; } }
 const ttsOK = ('speechSynthesis' in window) && ('SpeechSynthesisUtterance' in window);
 if (ttsOK) { loadVoices(); try { speechSynthesis.onvoiceschanged = loadVoices; } catch (e) {} }
-function pickZhVoice(){ return voices.find(v => /^zh[-_]?(CN|Hans)/i.test(v.lang)) || voices.find(v => /^zh/i.test(v.lang)); }
+const DEFAULT_RATE = 0.8;
+const TEST_TEXT = '你好，我是学生。我们一起喝茶吧。';
+function langVoices(){ return voices.filter(v => /^(zh|cmn)/i.test(v.lang)); }
+// 자동 선택: 대만(zh-TW)·홍콩/광둥어(zh-HK, yue) 음성을 빼고 보통화(zh-CN)를 우선한다
+function autoVoice(){
+  const z = langVoices();
+  const main = z.filter(v => !/(HK|TW|MO|yue|Hant)/i.test(v.lang + ' ' + v.name));
+  return main.find(v => /(CN|Hans)/i.test(v.lang) && v.localService !== false) || main.find(v => /(CN|Hans)/i.test(v.lang)) || main[0] || z[0] || null;
+}
+function pickZhVoice(){
+  const chosen = S && S.settings && S.settings.voice ? voices.find(x => x.voiceURI === S.settings.voice) : null;
+  return chosen || autoVoice();
+}
+function voiceOptionsHtml(){
+  const list = langVoices(), auto = autoVoice(), cur = S.settings.voice || '';
+  if (!list.length) return `<option value="">자동 (기기 기본 음성)</option>`;
+  return `<option value="" ${cur ? '' : 'selected'}>자동 — ${esc(auto ? auto.name + ' (' + auto.lang + ')' : '기기 기본')}</option>` +
+    list.map(v => `<option value="${esc(v.voiceURI)}" ${cur === v.voiceURI ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})${v.localService === false ? ' · 온라인' : ''}</option>`).join('');
+}
 function pickKoVoice(){ return voices.find(v => /^ko/i.test(v.lang)); }
 function speak(text){
   if (!ttsOK) return;
@@ -10114,9 +10142,9 @@ function speak(text){
   try {
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'zh-CN'; u.rate = 0.8;
     const v = pickZhVoice();
-    if (v) u.voice = v;
+    if (v) { u.voice = v; u.lang = v.lang; } else u.lang = 'zh-CN';
+    u.rate = (S && S.settings && S.settings.rate) || DEFAULT_RATE;
     speechSynthesis.speak(u);
   } catch (e) {}
 }
@@ -10497,25 +10525,30 @@ function stagebar(stage){ return `<span class="stagebar">${INTERVALS.map((_,i)=>
 // 목적이지, 채점을 두 번 하라는 뜻이 아니다 — 처음 등장(extraView:false)만 채점하고, 같은 단어가 다시
 // 나오면(재출현, extraView:true) finishCard가 applyGrade·logToday를 건너뛴다(아래 참고).
 function startSession(extra){
-  let cards = buildSessionQueue(S.words, S.settings.weekWeights || {}, Date.now());
-  if (extra) cards = shuffle(S.words.filter(w => weekLevelOf(w.added, S.settings.weekWeights || {}) !== 'off')).slice(0, 10);
+  let cards;
+  if (extra === 'focus') cards = shuffle(focusWords());   // 체크한 단어는 주차 설정('쉬는 주차' 포함)과 상관없이 모두 나온다
+  else {
+    cards = buildSessionQueue(S.words, S.settings.weekWeights || {}, Date.now());
+    if (extra) cards = shuffle(S.words.filter(w => weekLevelOf(w.added, S.settings.weekWeights || {}) !== 'off')).slice(0, 10);
+  }
   if (!cards.length) { session.active = false; return false; }
+  const now0 = Date.now(), dueSet = new Set(cards.filter(w => w.due <= now0).map(w => w.id));
   const seen = new Set();
   const queue = cards.map(w => {
     const extraView = seen.has(w.id); seen.add(w.id);
     return { id: w.id, extraView };
   });
-  session = { active:true, finished:false, extra, queue, cur:null, curExtra:false, type:null, revealed:false, pending:null, done:0, ok:0, graded:0, total: cards.length };
+  session = { active:true, finished:false, extra: !!extra, focus: extra === 'focus', dueSet, queue, cur:null, curExtra:false, type:null, revealed:false, pending:null, done:0, ok:0, graded:0, total: cards.length };
   nextCard();
   return true;
 }
 function pickType(w){
   const m = S.settings.mode;
   const n = [...w.hz.replace(/\s+/g, '')].filter(isCJK).length;
-  const canWrite = n >= 1 && n <= 4;
+  const canWrite = n >= 1 && n <= 4 && !w.noWrite;
   const canSpeak = speechOK && S.settings.speakCards !== false;
   const canCloze = !!clozeOf(w);
-  if (m === 'write') return canWrite ? 'write' : 'recog';
+  if (m === 'write') return canWrite ? 'write' : 'produce';
   if (m === 'speak') {
     if (speechOK) return 'speak';
     if (!speakUnsupportedNotified) { speakUnsupportedNotified = true; toast('이 기기는 음성 인식을 지원하지 않아 다른 방식으로 보여드려요'); }
@@ -10553,11 +10586,36 @@ function finishCard(result){
     render();
     return;
   }
-  applyGrade(w, result, session.extra);
+  applyGrade(w, result, session.extra && !(session.dueSet && session.dueSet.has(w.id)));
   session.done++; session.graded++; if (result !== 'fail') session.ok++;
   if (result === 'fail') session.queue.push({ id: w.id, extraView:false });   // 틀린 카드는 이 세션 끝에 다시
   nextCard();
   render();
+}
+
+// ---------- 집중 복습(체크한 단어) ----------
+function focusWords(){ return S.words.filter(w => w.focus); }
+function focusBarHtml(){
+  const n = focusWords().length;
+  return `<div class="focusbar" id="focusbar">
+    <div class="fhead"><span>집중 복습 <b id="focusCount">${n}</b>개 체크됨</span><button class="link" data-act="focusOnly" style="padding:0">${listState.focusOnly ? '전체 보기' : '체크한 것만 보기'}</button></div>
+    <div class="chiprow">
+      <button class="chip" data-act="focusRecent">최근 등록 20개 체크</button>
+      <button class="chip" data-act="focusMissed">많이 틀린 20개 체크</button>
+      <button class="chip" data-act="focusClear" id="focusClear" ${n ? '' : 'disabled'}>체크 모두 해제</button>
+    </div>
+    <button class="btn primary" data-act="startFocus" id="startFocus" ${n ? '' : 'disabled'}>체크한 ${n}개 복습</button>
+  </div>`;
+}
+function updateFocusBar(){
+  const n = focusWords().length;
+  const c = $('#focusCount'); if (c) c.textContent = n;
+  const b = $('#startFocus'); if (b) { b.textContent = `체크한 ${n}개 복습`; b.disabled = !n; }
+  const x = $('#focusClear'); if (x) x.disabled = !n;
+}
+function focusAdd(list, label){
+  let added = 0; list.forEach(w => { if (!w.focus) { w.focus = true; added++; } });
+  save(); refreshList(); toast(added ? `${label} ${added}개를 체크했어요` : '이미 모두 체크돼 있어요');
 }
 
 // ---------- render ----------
@@ -10624,6 +10682,7 @@ function renderReview(v){
       <p class="meaning">${session.graded}개 복습, ${session.ok}개 맞았어요${session.done > session.graded ? ` (한 번 더 보기 ${session.done - session.graded}개)` : ''}</p>
       <p class="muted small">${dueCards().length ? `대기 카드가 ${dueCards().length}개 더 있어요.` : `다음 복습은 ${nextDueText()}.`}</p>
       ${dueCards().length ? `<button class="btn primary" data-act="start">이어서 복습</button>` : ''}
+      ${focusWords().length ? `<button class="btn" data-act="startFocus">체크한 ${focusWords().length}개 집중 복습</button>` : ''}
       <button class="btn" data-act="extra">랜덤으로 10개 더 복습</button>
       <button class="btn quiet" data-go="add">새 단어 추가</button></section>`;
     bindReviewModeBar();
@@ -10634,6 +10693,7 @@ function renderReview(v){
     if (startSession(false)) { renderReview(v); return; }
     v.innerHTML = reviewModeBarHtml() + `<section class="card empty">${tiles('休息', 96)}
       <p style="margin-top:18px">지금 복습할 카드가 없어요.<br>다음 복습은 <strong>${nextDueText()}</strong>예요.</p>
+      ${focusWords().length ? `<button class="btn primary" data-act="startFocus">체크한 ${focusWords().length}개 집중 복습</button>` : `<p class="hint">단어장 탭에서 체크한 단어만 골라 집중 복습할 수 있어요.</p>`}
       <button class="btn" data-act="extra">랜덤으로 10개 미리 복습</button>
       <p class="hint" style="margin-top:8px">미리 복습에서는 틀린 카드만 다시 대기열에 들어가요.</p>
       <button class="btn quiet" data-go="add">새 단어 추가</button></section>`;
@@ -10645,7 +10705,7 @@ function renderReview(v){
   const remain = session.queue.length + 1;
   const pct = Math.round(session.done / (session.done + remain) * 100);
   const head = reviewModeBarHtml() + `<div class="progress" aria-hidden="true"><i style="width:${pct}%"></i></div>
-    <p class="small muted center" style="margin:-6px 0 8px">${session.extra ? '미리 복습' : '복습'} — 남은 카드 ${remain}개</p>`;
+    <p class="small muted center" style="margin:-6px 0 8px">${session.focus ? '집중 복습' : session.extra ? '미리 복습' : '복습'} — 남은 카드 ${remain}개${!session.focus && focusWords().length ? ` · <button class="link" data-act="startFocus" style="padding:0;font-size:13px">체크한 ${focusWords().length}개로 전환</button>` : ''}</p>`;
   const audio = ttsOK ? `<button class="iconbtn" data-act="speak" aria-label="발음 듣기">듣기</button>` : '';
   const answer = (showHz) => `
     ${showHz ? tiles(w.hz, 96) : ''}
@@ -10688,7 +10748,8 @@ function renderReview(v){
         <div id="ansTiles">${answerTiles(chars.length, ans)}</div>
         <div id="rpad"></div>
         <p class="hint" style="margin-top:6px">손글씨는 획순·획 방향까지 맞춰서 써야 후보에 잘 잡혀요. 후보에 안 나오면 정답 확인 뒤 "획순 보기"로 표준 획순을 확인해 보세요.</p>
-        <button class="btn quiet" data-act="giveup">모르겠어요</button></section>`;
+        <button class="btn quiet" data-act="giveup">모르겠어요</button>
+        <button class="link" data-act="noWrite">손글씨 인식이 잘 안 돼요 — 이 단어는 병음 타이핑으로</button></section>`;
     } else {
       body = `<section class="card center">
         <div class="stamp pop ${p.result === 'fail' ? 'wrong' : ''}">${p.result === 'fail' ? '错' : '对'}</div>
@@ -10988,12 +11049,14 @@ function saveBulk(){
 function stageText(w){ return w.stage >= INTERVALS.length-1 ? '장기 기억' : (w.due <= Date.now() ? '복습 대기' : `다음 ${relTime(w.due)}`); }
 function wordItemHtml(w, issueOf){
   const open = listState.open === w.id, edit = listState.edit === w.id, iss = issueOf(w);
+  const nChars = [...w.hz.replace(/\s+/g, '')].filter(isCJK).length;
   return `<div class="witem">
+    <div class="wrow"><label class="wcheck" title="집중 복습에 포함"><input type="checkbox" data-focus="${esc(w.id)}" ${w.focus ? 'checked' : ''} aria-label="${esc(w.hz)} 집중 복습에 포함"></label>
     <button class="whead" data-open="${esc(w.id)}" aria-expanded="${open}">
       <span class="whz">${esc(w.hz)}</span>
       <span class="wmeta"><div class="wpy">${esc(marks(w.py))}</div><div class="wmean">${esc(w.mean)}</div></span>
       <span class="wdue">${iss.length ? '<span class="wflag">병음 확인</span><br>' : ''}${stageText(w)}</span>
-    </button>
+    </button></div>
     ${open ? `<div class="wbody">${edit ? `
         <label>한자</label><input type="text" class="input-hz" id="e-hz" value="${esc(w.hz)}">
         <label>병음</label><input type="text" id="e-py" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(w.py)}">
@@ -11006,6 +11069,7 @@ function wordItemHtml(w, issueOf){
         ${iss.length ? issuesHtml(iss) : ''}
         ${w.ex ? `<div class="example" style="margin:${iss.length ? '10px' : '0'} 0 8px"><span class="hz-inline">${esc(w.ex)}</span></div>` : ''}
         <div>단계 ${stagebar(w.stage)} <span style="margin-left:8px">맞음 ${(w.reps||0)-(w.lapses||0)}, 틀림 ${w.lapses||0}</span></div>
+        ${nChars >= 1 && nChars <= 4 ? `<label class="radio" style="border-top:0;padding:8px 0 0"><input type="checkbox" data-nowrite="${esc(w.id)}" ${w.noWrite ? 'checked' : ''}><div>손글씨 카드 대신 병음 입력으로 복습</div></label>` : ''}
         <div class="row">
           ${ttsOK ? `<button class="btn" data-speak="${esc(w.id)}">듣기</button>` : ''}
           ${strokeCharsOf(w.hz).length ? `<button class="btn" data-act="strokeOpen" data-strokehz="${esc(w.hz)}">획순</button>` : ''}
@@ -11020,18 +11084,20 @@ function listHtml(){
   let words = S.words.slice().sort((a,b) => b.added - a.added);
   const flaggedN = words.filter(w => issueOf(w).length).length;
   if (listState.flagOnly && flaggedN) words = words.filter(w => issueOf(w).length);
+  if (listState.focusOnly) words = words.filter(w => w.focus);
   const searching = !!q;
   words = words.filter(w => !q || w.hz.includes(q) || w.py.includes(q) || marks(w.py).includes(q) || w.mean.toLowerCase().includes(q) || (w.ex||'').includes(q));
+  const focusBar = S.words.length ? focusBarHtml() : '';
   const tools = flaggedN ? `<div class="listtools"><button class="link" data-act="toggleFlag">${listState.flagOnly ? '전체 보기' : `병음 확인 필요 ${flaggedN}개만 보기`}</button></div>` : '';
-  if (!words.length) return tools + `<section class="card empty">${S.words.length ? '검색 결과가 없어요.' : '아직 단어가 없어요. 추가 탭에서 첫 단어를 넣어 보세요.'}</section>`;
+  if (!words.length) return focusBar + tools + `<section class="card empty">${listState.focusOnly ? '체크한 단어가 없어요.' : S.words.length ? '검색 결과가 없어요.' : '아직 단어가 없어요. 추가 탭에서 첫 단어를 넣어 보세요.'}</section>`;
   // 검색 중에는 주차 구분 없이 평평하게 보여준다 — 찾는 데 방해되지 않게.
-  if (searching) return tools + `<div class="wlist">${words.map(w => wordItemHtml(w, issueOf)).join('')}</div>`;
+  if (searching) return focusBar + tools + `<div class="wlist">${words.map(w => wordItemHtml(w, issueOf)).join('')}</div>`;
   // 등록 주차별로 묶는다(최근 주차가 위). 그룹당 단어의 added는 다 같은 주차라 레벨도 그룹 단위로 같다.
   const weights = S.settings.weekWeights || {};
   const groups = new Map();
   words.forEach(w => { const k = weekKeyOf(w.added); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(w); });
   const keys = [...groups.keys()].sort().reverse();
-  return tools + keys.map((k, i) => {
+  return focusBar + tools + keys.map((k, i) => {
     const list = groups.get(k);
     const open = listState.weekOpen[k] !== undefined ? listState.weekOpen[k] : (i === 0);
     const lv = weekLevelOf(list[0].added, weights);
@@ -11134,6 +11200,16 @@ function renderSettings(v){
     </section>
     <div class="gap"></div>
     <section class="card">
+    <h2>발음 음성</h2>
+    <p class="small muted" style="margin:0 0 6px">발음은 녹음이 아니라 이 기기의 음성 합성으로 읽어요. 이상하게 들리면 다른 음성으로 바꿔 보세요. 기기마다 목록이 달라요.</p>
+    <label for="voiceSel">음성</label>
+    <select id="voiceSel">${voiceOptionsHtml()}</select>
+    <label for="rateSel">속도 <span id="rateVal">${(S.settings.rate || DEFAULT_RATE).toFixed(2)}</span></label>
+    <input type="range" id="rateSel" min="0.5" max="1.1" step="0.05" value="${S.settings.rate || DEFAULT_RATE}">
+    <button class="btn" data-act="testVoice">들어 보기</button>
+    </section>
+    <div class="gap"></div>
+    <section class="card">
     <h2>복습 방식</h2>
     <p class="small muted" style="margin:0 0 4px">복습 화면 위쪽 칩에서 바로 바꿀 수 있어요.</p>
     <label class="radio"><input type="checkbox" id="autoAudio" ${S.settings.autoAudio?'checked':''}><div>정답이 보일 때 발음 자동 재생<span class="small muted">${ttsOK ? '기기의 중국어 음성을 사용해요' : '이 기기에서는 음성 재생을 지원하지 않아요'}</span></div></label>
@@ -11182,6 +11258,9 @@ function renderSettings(v){
     render();
   }));
   $('#autoAudio').addEventListener('change', e => { S.settings.autoAudio = e.target.checked; save(); });
+  $('#voiceSel').addEventListener('change', e => { if (e.target.value) S.settings.voice = e.target.value; else delete S.settings.voice; save(); speak(TEST_TEXT); });
+  $('#rateSel').addEventListener('input', e => { $('#rateVal').textContent = (+e.target.value).toFixed(2); });
+  $('#rateSel').addEventListener('change', e => { S.settings.rate = +e.target.value; save(); speak(TEST_TEXT); });
 }
 function exportTsv(){ $('#io').value = S.words.map(w => [w.hz, marks(w.py), w.mean, w.ex||''].join('\t')).join('\n'); toast('탭으로 구분된 단어 목록을 만들었어요'); }
 function exportJson(){ $('#io').value = JSON.stringify(S); toast('학습 기록을 포함한 백업을 만들었어요'); }
@@ -11381,7 +11460,18 @@ function strokeCharsOf(hz){
   const chars = [...String(hz || '').replace(/\s+/g, '')].filter(isCJK);
   return [...new Set(chars)];
 }
-function hasStrokeData(ch, data){ return !!(data && Object.prototype.hasOwnProperty.call(data, ch)); }
+function hasStrokeData(ch, data){ return !!(data && Object.prototype.hasOwnProperty.call(data, ch)) || !!strokeRemote[ch]; }
+// 내장 데이터(상위 1000자)에 없는 글자는 hanzi-writer-data CDN에서 받아온다(약 9,000자). 오프라인이면 실패로 표시.
+const strokeRemote = {}, strokeRemoteState = {};   // ch -> 데이터 / 'loading' | 'fail'
+function fetchStrokeRemote(ch){
+  if (strokeRemote[ch] || strokeRemoteState[ch] === 'loading') return;
+  strokeRemoteState[ch] = 'loading';
+  fetch('https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json')
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(d => { strokeRemote[ch] = d; delete strokeRemoteState[ch]; })
+    .catch(() => { strokeRemoteState[ch] = 'fail'; })
+    .then(() => { const m = $('#strokeModal'); if (m && !m.hidden && strokeUi.chars[strokeUi.active] === ch) renderStrokeModal(); });
+}
 
 // writer·stageEl은 모달을 열고 닫을 때마다 새로 만들지 않고 하나만 계속 재사용한다 — HanziWriter는 생성
 // 시점(_setupListeners)에 document에 mouseup/touchend 리스너를 달고 라이브러리에 해제 API가 없어서,
@@ -11406,11 +11496,13 @@ function strokeModalHtml(){
     ? `<div class="chiprow">${strokeUi.chars.map((c, i) => `<button class="chip ${i === strokeUi.active ? 'on' : ''}" data-strokechar="${i}">${esc(c)}</button>`).join('')}</div>`
     : '';
   const ok = hasStrokeData(ch, strokeData);
-  // 데이터 파싱 자체가 실패한 경우(strokeDataFailed)와 이 글자만 데이터가 없는 경우는 원인이 다르므로
-  // 문구를 구분한다 — 전자는 재시도를 안내하고, 후자는 지금은 없고 나중에 채워질 수 있다는 뉘앙스로 둔다.
-  const emptyMsg = strokeDataFailed
-    ? '획순 데이터를 불러오지 못했어요. 새로고침 후 다시 시도해 주세요.'
-    : '이 글자의 획순 데이터는 아직 준비 중이에요.';
+  if (!ok && strokeRemoteState[ch] !== 'fail') fetchStrokeRemote(ch);
+  // 내장 파싱 실패 / 원격에서 받는 중 / 원격에서도 못 받음 — 원인별로 문구를 나눈다.
+  const emptyMsg = strokeRemoteState[ch] === 'loading'
+    ? '이 글자의 획순을 인터넷에서 불러오는 중이에요…'
+    : strokeRemoteState[ch] === 'fail'
+      ? '이 글자의 획순을 불러오지 못했어요. 인터넷 연결을 확인해 주세요. 획순 데이터가 없는 드문 글자일 수도 있어요.'
+      : strokeDataFailed ? '획순 데이터를 불러오지 못했어요. 새로고침 후 다시 시도해 주세요.' : '이 글자의 획순을 불러오는 중이에요…';
   return `<div class="modalcard">
     <div class="modalhead">
       <h2 style="margin:0">획순${strokeUi.chars.length > 1 ? ` — ${esc(strokeUi.chars.join(''))}` : ''}</h2>
@@ -11470,7 +11562,7 @@ function mountStrokeWriter(){
       delayBetweenStrokes: 250,
       strokeColor: '#1E2433', outlineColor: '#D5DAE3', highlightColor: '#24408E', drawingColor: '#24408E',
       showHintAfterMisses: 1, markStrokeCorrectAfterMisses: 3,
-      charDataLoader: (c, onLoad, onErr) => { const d = strokeData && strokeData[c]; if (d) onLoad(d); else onErr(); }
+      charDataLoader: (c, onLoad, onErr) => { const d = (strokeData && strokeData[c]) || strokeRemote[c]; if (d) onLoad(d); else onErr(); }
     });
   } else {
     // 글자 탭 전환·모드 전환·"다시 재생" 모두 여기로 들어온다 — 새 인스턴스를 만들지 않고 재사용한다.
@@ -11508,6 +11600,12 @@ document.getElementById('strokeModal').addEventListener('click', e => {
   if (d.strokemode) { strokeUi.mode = d.strokemode; renderStrokeModal(); return; }
   if (d.act === 'strokeClose') { closeStrokeModal(); return; }
   if (d.act === 'strokeReplay') { mountStrokeWriter(); return; }
+});
+$('#view').addEventListener('change', e => {
+  const f = e.target.closest('input[data-focus]');
+  if (f) { const w = S.words.find(x => x.id === f.dataset.focus); if (w) { if (f.checked) w.focus = true; else delete w.focus; save(); updateFocusBar(); } return; }
+  const nw = e.target.closest('input[data-nowrite]');
+  if (nw) { const w = S.words.find(x => x.id === nw.dataset.nowrite); if (w) { if (nw.checked) w.noWrite = true; else delete w.noWrite; save(); toast(nw.checked ? '이 단어는 손글씨 대신 병음 입력으로 복습해요' : '손글씨 카드에 다시 포함했어요'); } }
 });
 $('#view').addEventListener('click', e => {
   const t = e.target.closest('[data-act],[data-grade],[data-go],[data-open],[data-edit],[data-del],[data-save],[data-save-force],[data-speak],[data-cand],[data-mode],[data-wktoggle],[data-wklvl]');
@@ -11557,6 +11655,13 @@ $('#view').addEventListener('click', e => {
     case 'next': finishCard(session.pending.result); break;
     case 'extraNext': finishCard(); break; // 재출현 카드 — 채점 없이 다음으로(finishCard의 curExtra 분기)
     case 'start': startSession(false); render(); break;
+    case 'startFocus': if (!focusWords().length) { toast('체크한 단어가 없어요'); break; } tab = 'review'; startSession('focus'); render(); break;
+    case 'focusRecent': focusAdd(S.words.slice().sort((a,b) => b.added - a.added).slice(0, 20), '최근 등록'); break;
+    case 'focusMissed': { const m = S.words.filter(w => (w.lapses||0) > 0).sort((a,b) => (b.lapses||0) - (a.lapses||0) || (b.last||0) - (a.last||0)).slice(0, 20); if (!m.length) { toast('아직 틀린 단어가 없어요'); break; } focusAdd(m, '많이 틀린 단어'); break; }
+    case 'focusClear': S.words.forEach(w => { delete w.focus; }); save(); refreshList(); toast('체크를 모두 해제했어요'); break;
+    case 'focusOnly': listState.focusOnly = !listState.focusOnly; listState.open = null; refreshList(); break;
+    case 'noWrite': if (session.cur) { session.cur.noWrite = true; save(); pad.onPick = null; pad.onBack = null; session.ans = ''; session.type = 'produce'; toast('이 단어는 앞으로 병음 입력으로 복습해요. 단어장에서 되돌릴 수 있어요.'); render(); } break;
+    case 'testVoice': speak(TEST_TEXT); break;
     case 'extra': if (!startSession(true)) toast('복습할 단어가 없어요'); render(); break;
     case 'toggleBulk': addState.bulk = !addState.bulk; render(); break;
     case 'togglePad': pad.on = !pad.on; mountPad(); break;
