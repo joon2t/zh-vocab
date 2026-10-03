@@ -14,6 +14,29 @@ zh-vocab(단일 파일 앱 `index.html`)의 변경 이력을 기록한다. 여�
 
 ---
 
+## 2026-10-03 v6 단어 연습 모드 (병음/뜻/글자 중 체크 해제한 항목 연습)
+
+- 요지: 단어장에서 연습할 단어를 고르고, 병음·뜻·글자 중 하나만 체크 해제하면 해제한 항목을 맞히는 연습 모드를
+  추가했다. 복습 일정(SRS)·오늘 기록·집중 복습 체크와 완전히 분리(연습은 단어 학습 필드와 `S.log`를 쓰지 않음).
+  병음=입력(복습과 같은 채점), 뜻=4지선다(보기 부족 시 자가채점), 글자=손글씨(noWrite·5자 이상은 한자 4지선다로 대체,
+  "정답 보고 스스로 채점" 경로 제공). 첫 시도에 틀린 문제는 끝에 1회 재출제, 끝나면 결과 요약과 "틀린 것만 다시".
+- 변경 지점: `// ---------- practice ----------`·`// ---------- practice ui ----------` 두 섹션 신설(`importIo` 뒤,
+  handwriting pad 앞), `gradePinyin`(reading check 섹션, checkAnswer에서 추출)·`writeVerdict`(checkWrite에서 추출 —
+  동작 동일), `listFilter` 신설·`listHtml`·`wordItemHtml`(`listState.pick`일 때만 연습 체크박스), `render`(가상 탭
+  `practice`, 하단 탭은 단어장 강조), click/change 위임 진입 훅(`pr…` act, `practiceChange`), wipe의
+  `practiceReset`, `listState`에 `pick`·`selOnly`, CSS 연습 블록, `APP_VERSION`. `applyRemote`·session 섹션·pad 섹션은 무변경.
+- 진입점: 6번째 하단 탭은 360px에서 깨져 기각 — 단어장 상단 모드 칩(`집중 복습 체크`/`단어 연습 고르기`)과 탭 없는
+  가상 화면 `tab = 'practice'`.
+- 검증: 회귀 `node --test tests/*.test.mjs` 15건 중 13 통과·2 실패(실패 2건은 변경 전부터 있던 review-fixes-0913
+  isCJK 미주입·stroke-chars toString, 새 실패 없음). 신규 `tests/practice.test.mjs` 21/21 통과(옛 checkAnswer와
+  gradePinyin 385쌍 동등성 포함, 변이 주입 3종으로 테스트 무력화 아님 확인). 헤드리스 크롬 360px e2e 67/67 통과·콘솔
+  에러 0(세 유형 완주, 재출제, 결과 요약, SRS 필드·log 불변, PUT 0회, 원격 수신 중 화면 유지, XSS 텍스트 처리).
+  독립 리뷰 승인(🔴·🟡 없음, 🟢 3건: 결과 화면에서 그만하기 시 현재 카드 미집계, 연습 중 원격 삭제 시 요약 문구 불일치,
+  본 로그 갱신 — 앞 2건 미반영)
+- 타협/미해결: 선택한 단어(`practiceSel`)는 메모리 전용이라 새로고침하면 초기화된다(동기화 데이터 변경 최소화).
+  저장되는 것은 체크 조합 `S.settings.practiceFields`뿐. 뜻 4지선다의 동의어 한계는 결과 화면의 "맞은 것으로
+  처리"로 흡수한다. 손글씨 인식 정확도·모바일 터치·실제 음성·두 기기 동기화는 사람 확인 필요.
+
 ## 2026-09-13 통합 리뷰 수정: 동기화 로드 병합·id 이스케이프·듣기 2건·수정 중 렌더 가드 + 손글씨 획순 안내
 
 - 요지: 커밋 e33f384 상태를 독립 리뷰(앱 스크립트 전체 정독)와 헤드리스 크롬 실동작 점검(Playwright, 49항목)으로
