@@ -45,7 +45,7 @@ const load = new Function([
   'let S = { words: [], log: {}, settings: {} };',
   'function save(){ throw new Error("save() 호출됨 — 연습 섹션은 저장하지 않아야 한다"); }',
   practiceSrc,
-  'return { setS: v => { S = v; }, getPractice: () => practice, practiceSel, practiceTargetOf, practiceComboMsg, practiceChoices, practiceKindOf, meanClash, practiceNewRound, practiceRecord, practiceSummary, practiceStart, practiceNext, practiceFinishCard, practiceReset };'
+  'return { setS: v => { S = v; }, getPractice: () => practice, practiceSel, practiceTargetOf, practiceComboMsg, practiceChoices, practiceKindOf, meanClash, practiceNewRound, practiceRecord, practiceSummary, practiceStart, practiceNext, practiceFinishCard, practiceReset, practiceRepeat, practiceQuit, prAvoidSameSlot };'
 ].join('\n'));
 const M = load();
 
@@ -341,6 +341,214 @@ test('wordItemHtml: pick 모드는 data-psel(집중 data-focus 없음), 기본 �
   const b = mk({ open: null, edit: null })(w, () => []);
   assert.ok(a.includes('data-psel="w1"') && !a.includes('data-focus'), a.slice(0, 400));
   assert.ok(b.includes('data-focus') && !b.includes('data-psel'), b.slice(0, 400));
+});
+
+// ---------- v7: 이 단어 한 번 더 (17~29) ----------
+const agg = p => JSON.stringify({ q: p.queue, done: p.done, ok: p.ok, ft: p.firstTry, wrong: p.wrong, rr: p.retryRes, ids: p.ids, target: p.target });
+const freshS = (words) => { const S = { words: (words || BIG).map(x => ({ ...x })), log: {}, settings: {} }; M.setS(S); return S; };
+const setPending = (res, extra) => { M.getPractice().pending = Object.assign({ result: res, typed: res === 'fail' ? 'x' : '', gaveUp: false }, extra || {}); };
+const startRound = (ids, target, seed) => { freshS(); M.practiceReset(); assert.equal(M.practiceStart(ids, target, lcg(seed || 1)), true); return M.getPractice(); };
+
+// 17
+test('v7-17 카드 시작 시 반복 필드 초기값(again 0, heldRes null)', () => {
+  const p = startRound(['a', 'b', 'c'], 'py');
+  assert.equal(p.again, 0); assert.equal(p.heldRes, null);
+  setPending('fail'); M.practiceRepeat(lcg(2));
+  assert.equal(M.getPractice().again, 1);
+  M.practiceFinishCard('pass');
+  assert.equal(M.getPractice().again, 0, '다음 카드로 넘어가도 again이 남음'); assert.equal(M.getPractice().heldRes, null);
+});
+// 18
+test('v7-18 practiceRepeat 거부: pending 없음/비활성 → false, 상태 불변', () => {
+  const p = startRound(['a', 'b', 'c'], 'py');
+  const before = JSON.stringify(M.getPractice());
+  assert.equal(M.practiceRepeat(lcg(1)), false);
+  assert.equal(JSON.stringify(M.getPractice()), before);
+  M.practiceReset();
+  assert.equal(M.practiceRepeat(lcg(1)), false);
+  assert.deepEqual(M.getPractice(), { active: false, finished: false });
+});
+// 19
+test('v7-19 반복 1회: 집계 불변 + 카드 상태 리셋 + cur 참조 유지', () => {
+  const p = startRound(['a', 'b', 'c', 'd'], 'py');
+  const cur = p.cur, before = agg(p);
+  Object.assign(p, { ans: '你', spoken: true, revealed: true, curRetry: true });
+  setPending('fail');
+  assert.equal(M.practiceRepeat(lcg(3)), true);
+  const q = M.getPractice();
+  assert.equal(agg(q), before);
+  assert.equal(q.cur, cur); assert.equal(q.curRetry, true);
+  assert.equal(q.again, 1); assert.equal(q.heldRes, 'fail');
+  assert.equal(q.pending, null); assert.equal(q.revealed, false); assert.equal(q.ans, ''); assert.equal(q.spoken, false);
+  assert.equal(q.kind, M.practiceKindOf(cur, 'py', BIG, lcg(1)).kind);
+});
+// 20
+test('v7-20 반복 여러 번: 첫 시도 보류 유지, 남은 N개·done 불변', () => {
+  const p = startRound(['a', 'b', 'c', 'd'], 'py');
+  const remain = p.queue.length + 1, done = p.done, before = agg(p);
+  setPending('pass');
+  const seq = ['fail', 'pass', 'fail'];
+  for (let i = 0; i < 3; i++) {
+    assert.equal(M.practiceRepeat(lcg(i + 1)), true);
+    const q = M.getPractice();
+    assert.equal(q.heldRes, 'pass'); assert.equal(q.again, i + 1);
+    assert.equal(q.queue.length + 1, remain); assert.equal(q.done, done); assert.equal(agg(q), before);
+    setPending(seq[i]);
+  }
+});
+// 21
+test('v7-21 첫 시도 오답 → 반복 정답 → 다음: fail 집계 + 재출제, 이후 반복 필드 리셋', () => {
+  const p = startRound(['a', 'b', 'c'], 'py');
+  const id = p.cur.id, ok0 = p.ok;
+  setPending('fail'); M.practiceRepeat(lcg(1)); setPending('pass');
+  M.practiceFinishCard('pass');
+  const q = M.getPractice();
+  assert.equal(q.firstTry[id], 'fail'); assert.deepEqual(q.wrong, [id]); assert.equal(q.ok, ok0);
+  assert.deepEqual(q.queue[q.queue.length - 1], { id, retry: true });
+  let guard = 0;
+  while (M.getPractice().active && !(M.getPractice().cur.id === id && M.getPractice().curRetry) && guard++ < 20) M.practiceFinishCard('pass');
+  const r = M.getPractice();
+  assert.ok(r.active && r.cur.id === id && r.curRetry === true, '재출제 카드가 안 나옴');
+  assert.equal(r.again, 0); assert.equal(r.heldRes, null);
+});
+// 22
+test('v7-22 첫 시도 정답 → 반복 오답 → 다음: pass 집계, 재출제 없음', () => {
+  const p = startRound(['a', 'b', 'c'], 'py');
+  const id = p.cur.id, ok0 = p.ok;
+  setPending('pass'); M.practiceRepeat(lcg(1)); setPending('fail');
+  M.practiceFinishCard('fail');
+  const q = M.getPractice();
+  assert.equal(q.firstTry[id], 'pass'); assert.equal(q.ok, ok0 + 1);
+  assert.ok(!q.queue.some(x => x.id === id), '재출제 큐에 들어감'); assert.deepEqual(q.wrong, []);
+});
+// 23
+test('v7-23 재출제 카드에서 반복: retryRes는 첫 시도, 큐 증가 없음', () => {
+  const p = startRound(['a'], 'py');
+  const id = p.cur.id;
+  setPending('fail'); M.practiceFinishCard('fail');            // 첫 시도 오답 → 재출제 큐
+  let q = M.getPractice();
+  assert.ok(q.active && q.curRetry === true && q.cur.id === id);
+  const ftBefore = JSON.stringify(q.firstTry), qlen = q.queue.length;
+  setPending('fail'); M.practiceRepeat(lcg(1)); setPending('pass');
+  assert.equal(M.getPractice().curRetry, true);
+  M.practiceFinishCard('pass');
+  q = M.getPractice();
+  assert.equal(q.retryRes[id], 'fail'); assert.equal(q.queue.length, qlen); assert.equal(JSON.stringify(q.firstTry), ftBefore);
+  assert.equal(q.finished, true);
+});
+// 24
+test('v7-24 뜻 보기 재섞기: 새 배열·4개·정답 1개·자리 ≠ 직전(5회 연속, seed 30)', () => {
+  for (let seed = 1; seed <= 30; seed++) {
+    const p = startRound(['a', 'b', 'c'], 'mean', seed);
+    assert.equal(p.kind, 'choice');
+    for (let i = 0; i < 5; i++) {
+      const prevArr = M.getPractice().choices, prev = prevArr.findIndex(c => c.correct);
+      setPending('fail'); M.practiceRepeat(lcg(seed + 100 + i));
+      const q = M.getPractice();
+      assert.notEqual(q.choices, prevArr); assert.equal(q.choices.length, 4);
+      assert.equal(q.choices.filter(c => c.correct).length, 1);
+      assert.equal(q.choices.find(c => c.correct).label, q.cur.mean.trim());
+      assert.notEqual(q.choices.findIndex(c => c.correct), prev, `seed ${seed} 시도 ${i}: 정답 자리 동일`);
+    }
+  }
+});
+// 25
+test('v7-25 글자 카드 반복은 손글씨로 복귀(보기 전환/자가채점 후에도, seed 30)', () => {
+  for (let seed = 1; seed <= 30; seed++) {
+    let p = startRound(['a'], 'hz', seed);
+    assert.equal(p.kind, 'write'); assert.equal(p.alt.length, 4);
+    p.kind = 'choice'; p.choices = p.alt;
+    const prevIdx = p.choices.findIndex(c => c.correct), oldAlt = p.alt;
+    setPending('pass'); M.practiceRepeat(lcg(seed + 7));
+    p = M.getPractice();
+    assert.equal(p.kind, 'write'); assert.equal(p.choices, null);
+    assert.notEqual(p.alt, oldAlt); assert.equal(p.alt.length, 4);
+    assert.notEqual(p.alt.findIndex(c => c.correct), prevIdx, 'seed ' + seed + ': 정답 자리가 직전과 동일');
+    p.kind = 'self'; p.revealed = true; setPending('fail'); M.practiceRepeat(lcg(seed + 8));
+    p = M.getPractice();
+    assert.equal(p.kind, 'write'); assert.equal(p.revealed, false);
+  }
+});
+// 26
+test('v7-26 prAvoidSameSlot 단위', () => {
+  const mk = () => [{ label: 'A', correct: false }, { label: 'B', correct: true }, { label: 'C', correct: false }, { label: 'D', correct: false }];
+  for (let seed = 1; seed <= 50; seed++) {
+    const c = mk(), r = M.prAvoidSameSlot(c, 1, lcg(seed));
+    assert.equal(r, c);
+    assert.notEqual(c.findIndex(x => x.correct), 1, 'seed ' + seed);
+    assert.deepEqual(c.map(x => x.label).sort(), ['A', 'B', 'C', 'D']); assert.equal(c.filter(x => x.correct).length, 1);
+  }
+  const c2 = mk(); M.prAvoidSameSlot(c2, 0, lcg(1)); assert.deepEqual(c2, mk());   // prev가 오답 자리
+  assert.equal(M.prAvoidSameSlot(null, 1, lcg(1)), null);
+  const one = [{ label: 'A', correct: true }]; assert.equal(M.prAvoidSameSlot(one, 0, lcg(1)), one); assert.equal(one[0].label, 'A');
+  for (const bad of [-1, 4, 99, NaN, undefined]) { const c = mk(); assert.equal(M.prAvoidSameSlot(c, bad, lcg(1)), c); assert.deepEqual(c, mk()); }
+});
+// 27
+test('v7-27 practiceQuit: 반복 중/문제 화면/결과 화면/추가 집계 없음', () => {
+  let p = startRound(['a', 'b', 'c'], 'py');
+  const id = p.cur.id;
+  setPending('fail'); M.practiceRepeat(lcg(1)); setPending('pass');
+  assert.equal(M.practiceQuit(), true);                                  // (a)
+  p = M.getPractice(); assert.equal(p.finished, true); assert.equal(p.active, false);
+  let s = M.practiceSummary(p);
+  assert.equal(s.total, 1); assert.equal(s.ok, 0); assert.deepEqual(s.wrong, [id]);
+  startRound(['a', 'b', 'c'], 'py');                                     // (b)
+  assert.equal(M.practiceQuit(), false);
+  assert.deepEqual(M.getPractice(), { active: false, finished: false });
+  startRound(['a', 'b', 'c'], 'py');                                     // (c)
+  setPending('pass');
+  assert.equal(M.practiceQuit(), true);
+  s = M.practiceSummary(M.getPractice()); assert.equal(s.total, 1); assert.equal(s.ok, 1);
+  startRound(['a', 'b', 'c'], 'py');                                     // (d)
+  M.practiceFinishCard('pass'); M.practiceFinishCard('pass');
+  assert.equal(M.practiceQuit(), true);
+  assert.equal(M.practiceSummary(M.getPractice()).total, 2);
+});
+// 28
+test('v7-28 반복 섞인 전체 루프 = 반복 없는 루프(집계 동등성), S 불변', () => {
+  for (const target of ['py', 'mean', 'hz']) {
+    const resOf = (id, retry) => retry ? 'pass' : (id.charCodeAt(0) % 2 ? 'pass' : 'fail');
+    const run = (withRepeat) => {
+      const S = { words: BIG.map(x => Object.freeze({ ...x })), log: Object.freeze({}), settings: Object.freeze({}) };
+      Object.freeze(S.words); M.setS(S);
+      const before = JSON.stringify(S);
+      assert.equal(M.practiceStart(S.words.map(w => w.id), target, lcg(5)), true);
+      const rr = lcg(99); let guard = 0;
+      while (M.getPractice().active && guard++ < 200) {
+        const p = M.getPractice(), r = resOf(p.cur.id, p.curRetry);
+        if (!withRepeat) { M.practiceFinishCard(r); continue; }
+        p.pending = { result: r, typed: '', gaveUp: false };
+        const n = p.cur.id.charCodeAt(0) % 3;
+        for (let i = 0; i < n; i++) { assert.equal(M.practiceRepeat(lcg(i + 3)), true); M.getPractice().pending = { result: rr() < 0.5 ? 'pass' : 'fail', typed: '', gaveUp: false }; }
+        M.practiceFinishCard(n === 0 ? r : (rr() < 0.5 ? 'pass' : 'fail'));   // 반복이 없으면 첫 시도 결과 그대로
+      }
+      const p = M.getPractice();
+      assert.equal(p.finished, true);
+      assert.equal(JSON.stringify(S), before);
+      return { sum: M.practiceSummary(p), ft: p.firstTry, rr: p.retryRes };
+    };
+    assert.deepEqual(run(true), run(false), target);
+  }
+  M.practiceReset();
+});
+// 29
+test('v7-29 practiceResultHtml: 버튼 순서·반복 안내·정정 링크·자가채점', () => {
+  const pr = { again: 0, heldRes: null };
+  const fn = new Function('practice', 'tiles', 'marks', 'sandhiHintHtml', 'strokeCharsOf',
+    [escLine, fnSrc('practiceChoicesHtml'), fnSrc('practiceAnswerHtml'), fnSrc('practiceResultHtml'), 'return practiceResultHtml;'].join('\n'))(
+    pr, () => '', x => x, () => '', () => []);
+  const w = { id: 'a', hz: '你好', py: 'ni3 hao3', mean: '안녕', ex: '' };
+  let h = fn(w, 'type', { result: 'pass', typed: '', gaveUp: false }, 'py', '');
+  assert.ok(h.includes('data-act="prNext"') && h.includes('data-act="prRepeat"'));
+  assert.ok(!h.includes('첫 시도')); assert.ok(h.indexOf('prNext') < h.indexOf('prRepeat'));
+  h = fn(w, 'type', { result: 'fail', typed: 'x', gaveUp: false }, 'py', '');
+  assert.ok(h.includes('prOverride'));
+  pr.again = 2; pr.heldRes = 'fail';
+  h = fn(w, 'type', { result: 'fail', typed: 'x', gaveUp: false }, 'py', '');
+  assert.ok(!h.includes('prOverride')); assert.ok(h.includes('첫 시도: 틀림'));
+  pr.again = 0; pr.heldRes = null;
+  h = fn(w, 'self', { result: 'fail', typed: '', gaveUp: false }, 'mean', '');
+  assert.ok(h.includes('错') && h.includes('틀렸어요') && h.includes('prRepeat') && !h.includes('prOverride'));
 });
 
 console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped(전제 미충족)` : ''}`);

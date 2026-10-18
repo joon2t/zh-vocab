@@ -14,6 +14,23 @@ zh-vocab(단일 파일 앱 `index.html`)의 변경 이력을 기록한다. 여�
 
 ---
 
+## 2026-10-18 v7 연습 중 "이 단어 한 번 더" (같은 단어 반복)
+
+- 요지: 연습 결과 화면에 "이 단어 한 번 더" 버튼을 추가했다. 같은 단어·같은 방식 카드를 새로 만들어(보기는 다시 섞고
+  정답 자리는 직전과 다르게) 횟수 제한 없이 반복한다. 첫 시도 결과만 `practice.heldRes`에 보류했다가 "다음"/그만하기 때
+  한 번만 집계한다(반복 결과는 정답률·재출제에 반영하지 않음). 자가채점 카드도 결과 화면을 거치게 바꿨고,
+  결과 화면에서 그만하기 시 현재 카드가 집계에서 빠지던 문제(HANDOFF 🟢 1번)도 함께 고쳤다.
+- 변경 지점(index.html): `APP_VERSION`, `prAvoidSameSlot`(신설), `practiceCardReset`(again·heldRes), `practiceFinishCard`,
+  `practiceRepeat`·`practiceQuit`(신설), `practiceResultHtml`, `renderPractice` 머리 줄, `practiceMountPad`(stale에 시도 번호),
+  `practiceAct`(prQuit·prSelf·prRepeat), `pad`(gen)·`mountPadTo`·`padRecognize`(인식 경합).
+- 검증: practice 단위 33/0/1 SKIP(기존 SKIP), 변이 M1~M6 전부 탐지, repeat e2e 64/0(R15a~e 인식 지연 경합 포함 —
+  세대 검사 제거 변이에서 R15c/d/e FAIL, busy 리셋 제거 변이에서 재인식 검사 FAIL), practice e2e 68/1(날짜 기대값
+  문제 — HEAD에서도 동일), 전체 `node --test` 기준선 2건 외 신규 실패 0, 독립 리뷰 승인 → 수정 반영 후 재리뷰 승인.
+- 타협/미해결: 반복 결과는 통계에 남지 않음. 인식 응답 지연 시 이전 시도 결과 폐기(패드 세대 번호 `pad.gen`)로 수정
+  (`mountPadTo`가 세대 증가·busy 리셋, `padRecognize`가 await 뒤 세대 불일치면 DOM·pad 상태를 건드리지 않고 반환). 같은 카드 재렌더(원격 동기화 수신 등) 때도
+  진행 중이던 인식 결과는 버린다(획도 함께 초기화되므로).
+  실제 휴대폰 확인 필요(손글씨·키보드 포커스·음성).
+
 ## 2026-10-03 v6 단어 연습 모드 (병음/뜻/글자 중 체크 해제한 항목 연습)
 
 - 요지: 단어장에서 연습할 단어를 고르고, 병음·뜻·글자 중 하나만 체크 해제하면 해제한 항목을 맞히는 연습 모드를

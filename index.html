@@ -9791,7 +9791,7 @@ var HanziLookup=HanziLookup||{};HanziLookup.SubStroke=function(t,i,n,o){"use str
 (function(){
 'use strict';
 const KEY = 'zhvocab_v1';
-const APP_VERSION = '2026-10-03 v6 (단어 연습 모드)';
+const APP_VERSION = '2026-10-18 v7 (연습 중 한 단어 반복)';
 const DAY = 86400000;
 const INTERVALS = [0, 1, 3, 7, 14, 30, 60, 120]; // days per stage
 let S = null;
@@ -9808,7 +9808,7 @@ let addState = { bulk:false };
 let confirmDelete = null;
 let settingsUi = { storageMode:null }; // 'local' | 'server' — null이면 sync.url 유무로 최초 결정
 let speakUnsupportedNotified = false; // speak 모드를 명시 선택했는데 미지원일 때 1회만 안내
-const pad = { on:false, strokes:[], cur:null, busy:false, cands:[], size:340, cv:null, ctx:null };
+const pad = { on:false, gen:0, strokes:[], cur:null, busy:false, cands:[], size:340, cv:null, ctx:null };
 
 // ---------- helpers ----------
 const $ = (s, r) => (r||document).querySelector(s);
@@ -11408,6 +11408,15 @@ function practiceKindOf(w, target, words, rnd){
   return c ? { kind:'choice', choices:c, alt:null, why:null }
     : { kind:'self', choices:null, alt:null, why:'손글씨로 쓰기 어려운 단어인데 보기를 만들 단어도 부족해요. 이번 문제는 스스로 채점해요.' };
 }
+// 반복 출제 때 정답 자리가 직전(prevIdx)과 같으면 다른 자리와 맞바꾼다(위치로 외우지 않게).
+// 방금 practiceChoices로 새로 만든 보기 배열만 넘긴다(제자리 변경). 보기가 없거나 2개 미만이면 그대로 둔다.
+function prAvoidSameSlot(choices, prevIdx, rnd){
+  if (!choices || choices.length < 2 || !(prevIdx >= 0) || prevIdx >= choices.length || !choices[prevIdx].correct) return choices;
+  rnd = rnd || Math.random;
+  const j = (prevIdx + 1 + Math.floor(rnd() * (choices.length - 1))) % choices.length;
+  [choices[prevIdx], choices[j]] = [choices[j], choices[prevIdx]];
+  return choices;
+}
 function practiceNewRound(ids, target, rnd){
   const uniq = [...new Set(ids)];
   return { target, ids: uniq, queue: prShuffle(uniq.slice(), rnd).map(id => ({ id, retry:false })),
@@ -11431,7 +11440,7 @@ function practiceSummary(st){
 const practiceSel = new Set();
 let practice = { active:false, finished:false };
 function practiceCardReset(){
-  Object.assign(practice, { cur:null, curRetry:false, kind:null, choices:null, alt:null, why:null, pending:null, revealed:false, ans:'', spoken:false });
+  Object.assign(practice, { cur:null, curRetry:false, kind:null, choices:null, alt:null, why:null, pending:null, revealed:false, ans:'', spoken:false, again:0, heldRes:null });
 }
 function practiceStart(ids, target, rnd){
   const alive = (ids || []).filter(id => S.words.some(w => w.id === id));
@@ -11454,8 +11463,36 @@ function practiceNext(rnd){
 }
 function practiceFinishCard(result){
   if (!practice.active || !practice.cur) return;
-  practiceRecord(practice, practice.cur.id, practice.curRetry, result === 'pass');
+  // 한 번 더(반복) 중이면 반복 결과는 버리고, 보류해 둔 첫 시도 결과로 집계한다.
+  const res = practice.again ? practice.heldRes : result;
+  practiceRecord(practice, practice.cur.id, practice.curRetry, res === 'pass');
   practiceNext();
+}
+// 이 단어 한 번 더: 채점이 끝난 카드(pending 있음)를 같은 단어·같은 방식으로 새로 시작한다.
+// 라운드 집계(queue·done·ok·firstTry·wrong·retryRes)는 건드리지 않고 첫 시도 결과만 heldRes에 보류한다 —
+// "다음"(practiceFinishCard)이나 그만하기(practiceQuit) 때 그 결과로 한 번만 집계된다. 반복 횟수 제한 없음.
+function practiceRepeat(rnd){
+  if (!practice.active || !practice.cur || !practice.pending) return false;
+  const w = practice.cur, curRetry = practice.curRetry, again = (practice.again || 0) + 1;
+  const heldRes = practice.again ? practice.heldRes : (practice.pending.result === 'pass' ? 'pass' : 'fail');
+  const prevIdx = practice.kind === 'choice' && practice.choices ? practice.choices.findIndex(c => c.correct) : -1;
+  practiceCardReset();
+  const k = practiceKindOf(w, practice.target, S.words, rnd);
+  prAvoidSameSlot(k.choices || k.alt, prevIdx, rnd);
+  Object.assign(practice, { cur:w, curRetry, again, heldRes, kind:k.kind, choices:k.choices, alt:k.alt, why:k.why });
+  return true;
+}
+// 그만하기. 지금 카드에 채점 결과가 있으면(결과 화면이거나 한 번 더 반복 중) 첫 시도 결과로 집계한 뒤 끝낸다.
+// 푼 카드가 하나라도 있으면 결과 요약 상태(finished)로, 없으면 연습 상태를 비운다. 반환값: 요약을 보여 줄지.
+function practiceQuit(){
+  if (practice.active && practice.cur && (practice.again || practice.pending)) {
+    const res = practice.again ? practice.heldRes : practice.pending.result;
+    practiceRecord(practice, practice.cur.id, practice.curRetry, res === 'pass');
+  }
+  const any = practice.done > 0;
+  if (any) { practiceCardReset(); practice.active = false; practice.finished = true; }
+  else practice = { active:false, finished:false };
+  return any;
 }
 function practiceReset(){ practiceSel.clear(); practice = { active:false, finished:false }; }
 
@@ -11548,7 +11585,7 @@ function practiceChoicesHtml(field, p){
 function practiceResultHtml(w, k, p, t, audio){
   const fail = p.result === 'fail';
   const verdict = fail ? (p.gaveUp ? '정답을 확인하세요' : '틀렸어요') : (p.overridden ? '맞은 것으로 처리했어요' : '맞았어요');
-  const canOverride = fail && !p.gaveUp && (k === 'type' || (k === 'choice' && t === 'mean'));
+  const canOverride = fail && !p.gaveUp && (k === 'type' || (k === 'choice' && t === 'mean')) && !practice.again;
   return `<section class="card center">
     <div class="stamp pop ${fail ? 'wrong' : ''}">${fail ? '错' : '对'}</div>
     <div class="verdict">${verdict}</div>
@@ -11559,7 +11596,9 @@ function practiceResultHtml(w, k, p, t, audio){
     <div class="gap"></div>${audio}
     ${t === 'hz' && strokeCharsOf(w.hz).length ? `<button class="btn" data-act="strokeOpen" data-strokehz="${esc(w.hz)}">획순 보기</button>` : ''}
     <div class="gap"></div>
+    ${practice.again ? `<p class="hint" style="margin:0 0 4px">반복 연습 결과는 정답률에 넣지 않아요 (첫 시도: ${practice.heldRes === 'pass' ? '맞음' : '틀림'})</p>` : ''}
     <button class="btn primary" data-act="prNext">다음</button>
+    <button class="btn" data-act="prRepeat">이 단어 한 번 더</button>
     ${canOverride ? `<button class="link" data-act="prOverride">${k === 'type' ? '오타였어요, 맞은 것으로 처리' : '이것도 맞는 뜻이에요, 맞은 것으로 처리'}</button>` : ''}
   </section>`;
 }
@@ -11599,7 +11638,7 @@ function renderPractice(v){
   const remain = practice.queue.length + 1;
   const pct = Math.round(practice.done / (practice.done + remain) * 100);
   const head = `<div class="progress" aria-hidden="true"><i style="width:${pct}%"></i></div>
-    <p class="small muted center" style="margin:-6px 0 8px">단어 연습 · ${esc(practiceFieldLabel(t))} 맞히기 — 남은 ${remain}개 · <button class="link" data-act="prQuit" style="padding:0;font-size:13px">그만하기</button>${practice.curRetry ? ' <span class="prtag">다시 나온 문제</span>' : ''}</p>`;
+    <p class="small muted center" style="margin:-6px 0 8px">단어 연습 · ${esc(practiceFieldLabel(t))} 맞히기 — 남은 ${remain}개 · <button class="link" data-act="prQuit" style="padding:0;font-size:13px">그만하기</button>${practice.curRetry ? ' <span class="prtag">다시 나온 문제</span>' : ''}${practice.again ? ` <span class="prtag">반복 ${practice.again}회째</span>` : ''}</p>`;
   const audio = ttsOK ? `<button class="iconbtn" data-act="prSpeak" aria-label="발음 듣기">듣기</button>` : '';
   let body = '';
   if (p) {
@@ -11664,7 +11703,8 @@ function renderPractice(v){
 function practiceMountPad(w){
   const chars = [...w.hz.replace(/\s+/g, '')].filter(isCJK);
   // 연습 화면을 떠났거나 이미 채점된 뒤에 낡은 패드 콜백이 불리면 무시한다.
-  const stale = () => tab !== 'practice' || practice.cur !== w || !!practice.pending || practice.kind !== 'write';
+  const tryNo = practice.again;
+  const stale = () => tab !== 'practice' || practice.cur !== w || practice.again !== tryNo || !!practice.pending || practice.kind !== 'write';
   const redraw = () => { const el = $('#prAnsTiles'); if (el) el.innerHTML = answerTiles(chars.length, [...practice.ans]); };
   mountPadTo($('#prPad'), {
     backLabel: '답 한 글자 지우기',
@@ -11716,9 +11756,8 @@ function practiceAct(act, d){
     case 'prResume': if (practice.active || practice.finished) { tab = 'practice'; render(); } break;
     case 'prQuit':
       pad.onPick = pad.onBack = null;
-      if (practice.done > 0) { practiceCardReset(); practice.active = false; practice.finished = true; render(); }
-      else { practice = { active:false, finished:false }; tab = 'list'; render(); }
-      break;
+      if (!practiceQuit()) tab = 'list';
+      render(); break;
     case 'prToList': practice.finished = false; tab = 'list'; render(); break;
     case 'prRetryWrong': if (practiceStart(practiceSummary(practice).wrong, practice.target)) render(); else toast('다시 풀 단어가 없어요'); break;
     case 'prRestart': if (practiceStart(practice.ids, practice.target)) render(); else toast('다시 풀 단어가 없어요'); break;
@@ -11727,13 +11766,14 @@ function practiceAct(act, d){
     case 'prGiveup': if (w && !practice.pending) { practice.pending = { result:'fail', typed:'', gaveUp:true }; pad.onPick = pad.onBack = null; render(); } break;
     case 'prOverride': if (practice.pending && practice.pending.result === 'fail') { practice.pending.result = 'pass'; practice.pending.overridden = true; render(); } break;
     case 'prNext': if (practice.pending) { practiceFinishCard(practice.pending.result); render(); } break;
+    case 'prRepeat': if (practice.pending && practiceRepeat()) { pad.onPick = pad.onBack = null; render(); } break;
     case 'prChoose': {
       if (!w || !practice.choices || practice.pending) break;
       const i = +d.idx, c = practice.choices[i]; if (!c) break;
       practice.pending = { result: c.correct ? 'pass' : 'fail', picked: i, gaveUp:false }; render(); break;
     }
     case 'prReveal': if (w) { practice.revealed = true; render(); } break;
-    case 'prSelf': if (w && practice.revealed) { practiceFinishCard(d.res === 'pass' ? 'pass' : 'fail'); render(); } break;
+    case 'prSelf': if (w && practice.revealed && !practice.pending) { practice.pending = { result: d.res === 'pass' ? 'pass' : 'fail', typed:'', gaveUp:false }; render(); } break;
     case 'prRevealSelf': if (w && practice.kind === 'write' && !practice.pending) { practice.kind = 'self'; practice.revealed = true; pad.onPick = pad.onBack = null; render(); } break;
     case 'prToChoice': if (w && practice.kind === 'write' && practice.alt && !practice.pending) { practice.kind = 'choice'; practice.choices = practice.alt; pad.onPick = pad.onBack = null; render(); } break;
   }
@@ -11797,6 +11837,7 @@ function mountPad(){
 function mountPadTo(box, opts){
   if (!box) return;
   box.innerHTML = padHtml(opts);
+  pad.gen++; pad.busy = false; // 새 마운트 = 새 세대: 진행 중이던 인식 응답은 폐기되고 busy도 새로 시작
   pad.onPick = (opts && opts.onPick) || null; pad.onBack = (opts && opts.onBack) || null;
   pad.cv = null; pad.ctx = null; pad.strokes = []; pad.cur = null; pad.cands = [];
   const cv = $('#padcv');
@@ -11849,7 +11890,7 @@ function renderCands(){
 async function padRecognize(){
   if (pad.busy || !pad.ctx) return;
   if (!pad.strokes.length) { padMsg('먼저 글자를 써 주세요.'); return; }
-  pad.busy = true; const btn = $('#padRecog'); if (btn) btn.disabled = true;
+  pad.busy = true; const gen = pad.gen; const btn = $('#padRecog'); if (btn) btn.disabled = true;
   padMsg('Claude가 인식하는 중…');
   try {
     const b64 = padExport();
@@ -11860,7 +11901,9 @@ async function padRecognize(){
         { type: 'text', text: RECOG_PROMPT(pad.strokes.length) } ] }] })
     });
     if (!res.ok) throw new Error(`연결 오류 (HTTP ${res.status})`);
+    if (gen !== pad.gen) return; // 패드가 다시 마운트됨(다음/한 번 더/카드 전환): 이전 시도 결과 폐기
     const data = await res.json();
+    if (gen !== pad.gen) return;
     const txt = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('').replace(/```json|```/g, '').trim();
     const all = txt.match(/\[[^\[\]]*\]/g); if (!all) throw new Error('Claude가 글자를 확정하지 못했어요');
     let arr = JSON.parse(all[all.length-1]); if (!Array.isArray(arr)) throw new Error('Claude가 글자를 확정하지 못했어요');
@@ -11868,6 +11911,7 @@ async function padRecognize(){
     if (!arr.length) throw new Error('Claude가 글자를 확정하지 못했어요');
     pad.cands = [...new Set(arr.concat(pad.cands))].slice(0, 12); renderCands(); padMsg('Claude 추천을 앞에 넣었어요. 맞는 글자를 누르세요.');
   } catch (e) {
+    if (gen !== pad.gen) return;
     const msg = String(e && e.message || e);
     padMsg(/HTTP|확정/.test(msg) ? msg + (/HTTP/.test(msg) ? ' — Claude 앱 안에서 열었는지 확인해 주세요.' : ' 획을 또렷하게 다시 써 보세요.') : `연결할 수 없어요 (${msg}). Claude 앱 안에서 열었는지 확인해 주세요.`);
   }
